@@ -1,0 +1,17 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 0,
+  "workspaces": {
+    "": {
+      "name": "tiktok-signature",
+      "dependencies": {
+        "playwright-chromium": "^1.10.0",
+      },
+    },
+  },
+  "packages": {
+    "playwright-chromium": ["playwright-chromium@1.49.0", "", { "dependencies": { "playwright-core": "1.49.0" }, "bin": { "playwright": "cli.js" } }, "sha512-xU+nOHawNFKfJsHTTGyWqSJ5nRGGHQq1wTsc49H9rM+hDNnoKZi+3m12mGoLpqvJP7vRjZQ3uvU9/UJZbrJ1AA=="],
+
+    "playwright-core": ["playwright-core@1.49.0", "", { "bin": "cli.js" }, "sha512-R+3KKTQF3npy5GTiKH/T+kdhoJfJojjHESR1YEWhYuEKRVfVaxH3+4+GvXE5xyCngCxhxnykk0Vlah9v8fs3jA=="],
+  }
+}

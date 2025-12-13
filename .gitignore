@@ -1,0 +1,12 @@
+.env
+CookiesDir/*
+/temp/*
+bin
+lib
+include
+clips/*
+music/*
+output/*
+downloads/*
+__pycache__
+venv
