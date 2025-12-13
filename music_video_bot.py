@@ -27,7 +27,23 @@ from videogen.music_video import (
 )
 from videogen.gpt import generate_metadata
 from videogen.viral_optimizer import get_viral_optimizer
-from videogen.resource_manager import get_resource_manager, cleanup_resource_manager
+
+# Try to import resource manager (optional - requires psutil)
+try:
+    from videogen.resource_manager import get_resource_manager, cleanup_resource_manager
+    RESOURCE_MANAGEMENT_AVAILABLE = True
+except ImportError as e:
+    print(colored(f"[!] Warning: Resource management not available: {e}", "yellow"))
+    print(colored("[!] Install psutil for resource management: pip install psutil", "yellow"))
+    print(colored("[!] Bot will continue without resource management...", "yellow"))
+    RESOURCE_MANAGEMENT_AVAILABLE = False
+    
+    # Create dummy functions
+    def get_resource_manager():
+        return None
+    
+    def cleanup_resource_manager():
+        pass
 
 # Load environment variables
 load_dotenv()
@@ -57,11 +73,12 @@ def generate_music_video():
     Generate a music video using local clips and music, then upload to TikTok.
     Protected with resource management to prevent system overload.
     """
-    # Get resource manager
-    resource_manager = get_resource_manager()
+    # Get resource manager (if available)
+    resource_manager = get_resource_manager() if RESOURCE_MANAGEMENT_AVAILABLE else None
     
-    # Print current resource status
-    resource_manager.print_status()
+    # Print current resource status (if available)
+    if resource_manager:
+        resource_manager.print_status()
     
     def _generate_video_internal():
         """Internal function that does the actual video generation."""
@@ -113,8 +130,12 @@ def generate_music_video():
         return video_path, selected_music
     
     try:
-        # Execute video generation with resource management
-        video_path, selected_music = resource_manager.execute_with_resource_management(_generate_video_internal)
+        # Execute video generation with resource management (if available)
+        if resource_manager:
+            video_path, selected_music = resource_manager.execute_with_resource_management(_generate_video_internal)
+        else:
+            # Run without resource management
+            video_path, selected_music = _generate_video_internal()
         
         
         print(colored(f"[+] Video created: {video_path}", "green"))
@@ -359,12 +380,15 @@ def main():
         print(colored("[+] Generating first video...", "cyan"))
         generate_music_video()
     
-    # Initialize resource manager
-    resource_manager = get_resource_manager()
+    # Initialize resource manager (if available)
+    resource_manager = get_resource_manager() if RESOURCE_MANAGEMENT_AVAILABLE else None
     
     # Keep the script running
     print(colored("[+] Bot is running. Videos will be generated at optimal posting times.", "green"))
-    print(colored("[+] Resource management is active to prevent system overload.", "green"))
+    if resource_manager:
+        print(colored("[+] Resource management is active to prevent system overload.", "green"))
+    else:
+        print(colored("[!] Resource management is disabled. Install psutil for resource protection.", "yellow"))
     print(colored("[+] Checking for scheduled posts every minute...", "cyan"))
     
     last_cleanup_time = time.time()
@@ -374,23 +398,27 @@ def main():
         while True:
             schedule.run_pending()
             
-            # Periodic cleanup and resource status
-            current_time = time.time()
-            if current_time - last_cleanup_time >= cleanup_interval:
-                print(colored("[+] Performing periodic cleanup...", "cyan"))
-                resource_manager.print_status()
-                resource_manager.memory_manager.cleanup_temp_files()
-                resource_manager.memory_manager.force_garbage_collection()
-                last_cleanup_time = current_time
+            # Periodic cleanup and resource status (if resource manager available)
+            if resource_manager:
+                current_time = time.time()
+                if current_time - last_cleanup_time >= cleanup_interval:
+                    print(colored("[+] Performing periodic cleanup...", "cyan"))
+                    resource_manager.print_status()
+                    resource_manager.memory_manager.cleanup_temp_files()
+                    resource_manager.memory_manager.force_garbage_collection()
+                    last_cleanup_time = current_time
             
             time.sleep(60)  # Check every minute
     except KeyboardInterrupt:
         print(colored("\n[!] Shutdown requested by user", "yellow"))
     finally:
-        # Cleanup on exit
-        print(colored("[+] Cleaning up resources...", "yellow"))
-        cleanup_resource_manager()
-        print(colored("[+] Cleanup complete. Goodbye!", "green"))
+        # Cleanup on exit (if resource manager available)
+        if resource_manager:
+            print(colored("[+] Cleaning up resources...", "yellow"))
+            cleanup_resource_manager()
+            print(colored("[+] Cleanup complete. Goodbye!", "green"))
+        else:
+            print(colored("[+] Goodbye!", "green"))
 
 
 if __name__ == "__main__":
