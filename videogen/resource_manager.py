@@ -221,7 +221,7 @@ class ProcessQueue:
         # Wait for slot to become available
         while True:
             with self.lock:
-                if self.active_count < self.max_concurrent:
+                if self.active_count is not None and self.active_count < self.max_concurrent:
                     self.active_count += 1
                     break
             
@@ -268,8 +268,9 @@ class RateLimiter:
             # Remove old operations outside time window
             self.operations = [op_time for op_time in self.operations 
                              if now - op_time < self.time_window]
-            
-            return len(self.operations) < self.max_operations
+            if self.operations and self.max_operations > 0:
+                return len(self.operations) < self.max_operations
+            return True
     
     def wait_if_needed(self, max_wait: float = 60.0):
         """
