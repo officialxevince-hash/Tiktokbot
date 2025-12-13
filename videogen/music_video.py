@@ -159,12 +159,12 @@ def load_local_clips(
             print(colored(f"[+] Loaded {len(clips)} video clips (including processed segments)", "green"))
         else:
             # Original behavior: just list all video files
-        video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.MOV', '.MP4')
-        clips = [
-            os.path.join(clips_directory, f) 
-            for f in os.listdir(clips_directory)
-            if f.lower().endswith(video_extensions)
-        ]
+            video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.MOV', '.MP4')
+            clips = [
+                os.path.join(clips_directory, f) 
+                for f in os.listdir(clips_directory)
+                if f.lower().endswith(video_extensions)
+            ]
             print(colored(f"[+] Found {len(clips)} video clips in {clips_directory}", "green"))
         
         return clips
@@ -579,7 +579,7 @@ def prepare_clip(clip_path: str, target_size: Tuple[int, int] = (1080, 1920)) ->
     # Try to load the clip, with fallback to fixing corrupted files
     video_path = clip_path
     try:
-    clip = VideoFileClip(clip_path)
+        clip = VideoFileClip(clip_path)
     except Exception as e:
         error_msg = str(e)
         # Check if it's a duration/metadata error (corrupted file)
