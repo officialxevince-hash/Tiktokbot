@@ -20,6 +20,7 @@ TikTokAI is a Python-based tool that automates the creation and publication of T
 - ✨ Visual effects (zoom, flash, RGB shift, prism, jump cuts, etc.)
 - 🎞️ Support for multiple video clips and music files
 - 📤 Automatic TikTok upload with metadata generation
+- 🛡️ **Resource Management**: Prevents system overload with automatic throttling and monitoring
 
 ### General Features
 - AI-powered content generation using GPT/Gemini
@@ -125,6 +126,15 @@ GOOGLE_API_KEY=your_google_key_here
 # Optional - Viral optimization features
 USE_VIRAL_OPTIMIZATION=true
 OPTIMAL_POSTING_TIME=true
+
+# Optional - Resource Management (prevents system overload)
+# See RESOURCE_MANAGEMENT.md for detailed configuration
+RESOURCE_CPU_THRESHOLD=85.0        # CPU usage threshold (%)
+RESOURCE_MEMORY_THRESHOLD=85.0      # Memory usage threshold (%)
+RESOURCE_DISK_THRESHOLD=90.0       # Disk usage threshold (%)
+RESOURCE_MAX_CONCURRENT=1          # Max concurrent operations
+RESOURCE_RATE_LIMIT=2              # Max video operations per hour
+RESOURCE_RATE_WINDOW=3600.0        # Rate limit window (seconds)
 ```
 
 ### Directory Structure
@@ -250,6 +260,12 @@ tiktokai/
 
 **"bun not found"**
 - The script will auto-install bun, or install manually: `curl -fsSL https://bun.sh/install | bash`
+
+**"System overloads or crashes"**
+- The bot includes automatic resource management to prevent overload
+- See `RESOURCE_MANAGEMENT.md` for configuration options
+- Lower resource thresholds in `.env` if your system is struggling
+- The bot will automatically wait for resources to become available
 
 ## Viral Optimization Guide
 

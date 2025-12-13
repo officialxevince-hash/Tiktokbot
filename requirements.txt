@@ -69,6 +69,7 @@ assemblyai>=0.15.0              # Speech-to-text API (optional, for subtitles)
 # Utilities
 # ============================================================================
 termcolor>=2.0.0                # Colored terminal output
+psutil>=5.9.0                   # System and process utilities for resource monitoring
 
 # ============================================================================
 # Node.js Dependencies (for TikTok signature generation)
