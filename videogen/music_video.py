@@ -15,6 +15,8 @@ import subprocess
 import tempfile
 import gc
 import time
+import threading
+import signal
 from typing import List, Optional, Tuple
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips, VideoClip
 from moviepy.video.fx.all import crop, resize, rotate
@@ -1037,13 +1039,60 @@ def create_beat_synced_video(
             render_bitrate = '8000k'
             render_threads = threads
         
-        # Render with progress monitoring and error handling
+        # Render with progress monitoring, timeout, and error handling
         max_retries = 2
-        for attempt in range(max_retries):
+        rendering_timeout = max(300, int(video_duration * 10))  # At least 5 min, or 10x video duration
+        
+        def render_with_progress_monitoring():
+            """Render video with progress monitoring to detect freezes."""
+            render_start_time = time.time()
+            last_size = 0
+            no_progress_count = 0
+            max_no_progress_seconds = 90  # If no progress for 90 seconds, consider frozen
+            check_interval = 10  # Check every 10 seconds
+            
+            # Start progress monitoring thread
+            progress_monitor_active = threading.Event()
+            progress_monitor_active.set()
+            freeze_detected = threading.Event()
+            
+            def monitor_progress():
+                """Monitor rendering progress by checking file size growth and process activity."""
+                nonlocal last_size, no_progress_count
+                while progress_monitor_active.is_set() and not freeze_detected.is_set():
+                    time.sleep(check_interval)
+                    
+                    # Check if output file exists and is growing
+                    if os.path.exists(output_path):
+                        try:
+                            current_size = os.path.getsize(output_path)
+                            if current_size > last_size:
+                                # Progress detected
+                                last_size = current_size
+                                no_progress_count = 0
+                                size_mb = current_size / (1024 ** 2)
+                                elapsed = time.time() - render_start_time
+                                progress_pct = min(100, (current_size / max(1, video_duration * 8000000)) * 100)  # Rough estimate
+                                print(colored(f"[!] Rendering: {size_mb:.1f} MB (~{progress_pct:.0f}%) - {elapsed:.0f}s elapsed", "cyan"))
+                            else:
+                                # No progress
+                                no_progress_count += 1
+                                if no_progress_count * check_interval >= max_no_progress_seconds:
+                                    print(colored(f"[-] FREEZE DETECTED: No progress for {no_progress_count * check_interval} seconds", "red"))
+                                    freeze_detected.set()
+                        except OSError:
+                            # File might be locked, that's okay
+                            pass
+                    else:
+                        # File doesn't exist yet, that's normal at start
+                        elapsed = time.time() - render_start_time
+                        if elapsed > 30:  # If no file after 30 seconds, might be an issue
+                            no_progress_count += 1
+            
+            progress_thread = threading.Thread(target=monitor_progress, daemon=True)
+            progress_thread.start()
+            
             try:
-                # Force garbage collection before rendering
-                gc.collect()
-                
                 # Render with optimized settings
                 final_video.write_videofile(
                     output_path,
@@ -1061,6 +1110,53 @@ def create_beat_synced_video(
                     write_logfile=False  # Don't write log file
                 )
                 
+                # Check if freeze was detected
+                if freeze_detected.is_set():
+                    raise RuntimeError("Rendering appears to have frozen (no progress detected)")
+                    
+            finally:
+                progress_monitor_active.clear()
+                progress_thread.join(timeout=2.0)
+        
+        for attempt in range(max_retries):
+            try:
+                # Force garbage collection before rendering
+                gc.collect()
+                
+                print(colored(f"[+] Starting render (timeout: {rendering_timeout}s, attempt {attempt + 1}/{max_retries})", "cyan"))
+                render_start = time.time()
+                
+                # Use threading to add timeout capability
+                render_result = [None]  # Use list to allow modification from nested function
+                render_exception = [None]
+                
+                def render_worker():
+                    try:
+                        render_with_progress_monitoring()
+                        render_result[0] = True
+                    except Exception as e:
+                        render_exception[0] = e
+                
+                render_thread = threading.Thread(target=render_worker, daemon=False)
+                render_thread.start()
+                render_thread.join(timeout=rendering_timeout)
+                
+                if render_thread.is_alive():
+                    # Rendering timed out - try to interrupt
+                    print(colored(f"[-] Rendering timed out after {rendering_timeout}s, attempting to interrupt...", "red"))
+                    # Note: We can't easily kill the thread, but we can raise an exception
+                    # The thread will continue but we'll treat it as failed
+                    raise TimeoutError(f"Rendering exceeded timeout of {rendering_timeout} seconds")
+                
+                if render_exception[0]:
+                    raise render_exception[0]
+                
+                if render_result[0] is None:
+                    raise RuntimeError("Rendering completed but result is unknown")
+                
+                render_elapsed = time.time() - render_start
+                print(colored(f"[+] Rendering completed in {render_elapsed:.1f}s", "green"))
+                
                 # Verify output file was created and is valid
                 if not os.path.exists(output_path):
                     raise RuntimeError("Output file was not created")
@@ -1072,6 +1168,30 @@ def create_beat_synced_video(
                 print(colored(f"[+] Rendering completed successfully ({output_size / (1024**2):.1f} MB)", "green"))
                 break  # Success, exit retry loop
                 
+            except (TimeoutError, subprocess.TimeoutExpired) as e:
+                print(colored(f"[-] Rendering timeout (attempt {attempt + 1}/{max_retries}): {e}", "red"))
+                # Clean up any partial output
+                if os.path.exists(output_path):
+                    try:
+                        partial_size = os.path.getsize(output_path)
+                        if partial_size < 1024 * 1024:  # Less than 1MB, likely incomplete
+                            os.remove(output_path)
+                            print(colored("[+] Removed incomplete output file", "yellow"))
+                    except:
+                        pass
+                
+                if attempt < max_retries - 1:
+                    # Try with even more conservative settings and shorter timeout
+                    render_preset = 'ultrafast'
+                    render_bitrate = '4000k'
+                    render_threads = 1
+                    rendering_timeout = max(180, int(video_duration * 8))  # Shorter timeout
+                    gc.collect()
+                    print(colored("[!] Retrying with faster settings and shorter timeout...", "yellow"))
+                    time.sleep(3)  # Wait before retry to let system recover
+                else:
+                    raise RuntimeError(f"Rendering timed out after {max_retries} attempts. Video may be too complex. Try reducing duration or effects.")
+            
             except MemoryError as e:
                 print(colored(f"[-] Memory error during rendering (attempt {attempt + 1}/{max_retries}): {e}", "red"))
                 if attempt < max_retries - 1:
@@ -1087,18 +1207,29 @@ def create_beat_synced_video(
             
             except Exception as e:
                 error_msg = str(e)
-                if "crash" in error_msg.lower() or "killed" in error_msg.lower() or "signal" in error_msg.lower():
-                    print(colored(f"[-] Rendering crashed (attempt {attempt + 1}/{max_retries}): {e}", "red"))
+                if "crash" in error_msg.lower() or "killed" in error_msg.lower() or "signal" in error_msg.lower() or "frozen" in error_msg.lower() or "freeze" in error_msg.lower():
+                    print(colored(f"[-] Rendering issue detected (attempt {attempt + 1}/{max_retries}): {e}", "red"))
+                    # Clean up any partial output
+                    if os.path.exists(output_path):
+                        try:
+                            partial_size = os.path.getsize(output_path)
+                            if partial_size < 1024 * 1024:  # Less than 1MB, likely incomplete
+                                os.remove(output_path)
+                                print(colored("[+] Removed incomplete output file", "yellow"))
+                        except:
+                            pass
+                    
                     if attempt < max_retries - 1:
                         # Try with more conservative settings
                         render_preset = 'ultrafast'
                         render_bitrate = '4000k'
                         render_threads = 1
+                        rendering_timeout = max(180, int(video_duration * 8))  # Shorter timeout
                         gc.collect()
                         print(colored("[!] Retrying with safer settings...", "yellow"))
-                        time.sleep(3)  # Wait before retry
+                        time.sleep(3)  # Wait before retry to let system recover
                     else:
-                        raise RuntimeError(f"Rendering crashed after {max_retries} attempts: {e}")
+                        raise RuntimeError(f"Rendering failed after {max_retries} attempts: {e}")
                 else:
                     # Other errors, don't retry
                     raise
