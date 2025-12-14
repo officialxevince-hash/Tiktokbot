@@ -117,6 +117,14 @@ def generate_music_video():
         
         # Create beat-synced music video
         print(colored("[+] Creating beat-synced music video...", "cyan"))
+        
+        # Limit clips to prevent memory issues (use max 50 clips for processing)
+        # This prevents crashes with large clip libraries
+        MAX_CLIPS_FOR_PROCESSING = int(os.getenv('MAX_CLIPS_FOR_PROCESSING', '50'))
+        if len(clips) > MAX_CLIPS_FOR_PROCESSING:
+            print(colored(f"[!] Using {MAX_CLIPS_FOR_PROCESSING} clips out of {len(clips)} to prevent memory issues", "yellow"))
+            print(colored(f"[!] Set MAX_CLIPS_FOR_PROCESSING env var to change this limit", "yellow"))
+        
         video_path = create_beat_synced_video(
             music_path=selected_music,
             clips=clips,
@@ -124,7 +132,8 @@ def generate_music_video():
             max_duration=MAX_VIDEO_DURATION,
             effect_intensity=EFFECT_INTENSITY,
             threads=2,
-            temp_dir="./temp"
+            temp_dir="./temp",
+            max_clips_to_use=MAX_CLIPS_FOR_PROCESSING
         )
         
         return video_path, selected_music

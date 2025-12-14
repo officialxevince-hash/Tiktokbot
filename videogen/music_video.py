@@ -13,6 +13,7 @@ import random
 import uuid
 import subprocess
 import tempfile
+import gc
 from typing import List, Optional, Tuple
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips, VideoClip
 from moviepy.video.fx.all import crop, resize, rotate
@@ -331,6 +332,10 @@ def preprocess_large_clip(
                 segment.close()
                 extracted_segments.append(output_path)
                 
+                # Periodic cleanup to prevent memory buildup
+                if (i + 1) % 3 == 0:
+                    gc.collect()
+                
                 # Check output file size and display appropriately
                 output_size_bytes = os.path.getsize(output_path)
                 output_size_mb = output_size_bytes / (1024 ** 2)
@@ -374,6 +379,7 @@ def preprocess_clips_directory(
 ) -> List[str]:
     """
     Pre-process all large clips in a directory.
+    Optimized to handle large numbers of clips without memory issues.
     
     Args:
         clips_directory (str): Directory containing video clips
@@ -393,6 +399,8 @@ def preprocess_clips_directory(
     
     print(colored(f"[+] Pre-processing large clips in {clips_directory}...", "cyan"))
     
+    # Get list of files first
+    files_to_process = []
     for filename in os.listdir(clips_directory):
         if not filename.lower().endswith(video_extensions):
             continue
@@ -403,16 +411,33 @@ def preprocess_clips_directory(
         if '_segment_' in filename and 'processed' in clip_path:
             continue
         
-        # Pre-process if needed
-        processed_clips = preprocess_large_clip(
-            clip_path,
-            output_dir=processed_directory,
-            max_file_size_gb=max_file_size_gb,
-            segment_duration=segment_duration,
-            num_segments=num_segments
-        )
-        
-        all_clips.extend(processed_clips)
+        files_to_process.append(clip_path)
+    
+    print(colored(f"[+] Found {len(files_to_process)} files to process", "cyan"))
+    
+    # Process files one at a time to prevent memory buildup
+    for i, clip_path in enumerate(files_to_process):
+        try:
+            print(colored(f"[+] Processing file {i+1}/{len(files_to_process)}: {os.path.basename(clip_path)}", "cyan"))
+            
+            # Pre-process if needed
+            processed_clips = preprocess_large_clip(
+                clip_path,
+                output_dir=processed_directory,
+                max_file_size_gb=max_file_size_gb,
+                segment_duration=segment_duration,
+                num_segments=num_segments
+            )
+            
+            all_clips.extend(processed_clips)
+            
+            # Periodic garbage collection to prevent memory buildup
+            if (i + 1) % 5 == 0:
+                gc.collect()
+                print(colored(f"[+] Processed {i+1}/{len(files_to_process)} files, {len(all_clips)} clips total", "green"))
+        except Exception as e:
+            logger.warning(colored(f"[-] Error processing {clip_path}: {e}", "yellow"))
+            continue
     
     print(colored(f"[+] Total clips available after pre-processing: {len(all_clips)}", "green"))
     return all_clips
@@ -639,10 +664,12 @@ def create_beat_synced_video(
     max_duration: Optional[float] = None,
     effect_intensity: float = 0.5,
     threads: int = 2,
-    temp_dir: str = "./temp"
+    temp_dir: str = "./temp",
+    max_clips_to_use: Optional[int] = None
 ) -> str:
     """
     Create a music video with clips synced to beats.
+    Optimized for large numbers of clips with memory management.
     
     Args:
         music_path (str): Path to music file
@@ -651,12 +678,19 @@ def create_beat_synced_video(
         max_duration (Optional[float]): Maximum video duration in seconds
         effect_intensity (float): Intensity of effects (0.0 to 1.0)
         threads (int): Number of threads for rendering
+        temp_dir (str): Directory for temporary files
+        max_clips_to_use (Optional[int]): Maximum number of clips to use (None = use all)
     
     Returns:
         str: Path to created video
     """
     try:
         print(colored(f"[+] Creating beat-synced music video", "cyan"))
+        
+        # Limit number of clips if specified (prevents memory issues)
+        if max_clips_to_use and len(clips) > max_clips_to_use:
+            print(colored(f"[!] Limiting clips from {len(clips)} to {max_clips_to_use} to prevent memory issues", "yellow"))
+            clips = clips[:max_clips_to_use]
         
         # Ensure temp directory exists
         os.makedirs(temp_dir, exist_ok=True)
@@ -665,6 +699,9 @@ def create_beat_synced_video(
         os.environ['TMPDIR'] = os.path.abspath(temp_dir)
         os.environ['TMP'] = os.path.abspath(temp_dir)
         os.environ['TEMP'] = os.path.abspath(temp_dir)
+        
+        # Force garbage collection before starting
+        gc.collect()
         
         # Load music
         audio = AudioFileClip(music_path)
@@ -690,22 +727,15 @@ def create_beat_synced_video(
         # Get beat intervals
         intervals = get_beat_intervals(beats, duration)
         
-        # Prepare clips
+        # Validate clips
         if not clips:
             raise ValueError("No clips available")
         
-        print(colored(f"[+] Preparing {len(clips)} video clips", "cyan"))
-        prepared_clips = []
-        for clip_path in clips:
-            try:
-                clip = prepare_clip(clip_path)
-                prepared_clips.append(clip)
-            except Exception as e:
-                logger.warning(colored(f"[-] Error preparing clip {clip_path}: {e}", "yellow"))
-                continue
+        print(colored(f"[+] Processing {len(clips)} video clips (lazy loading enabled)", "cyan"))
         
-        if not prepared_clips:
-            raise ValueError("No valid clips could be prepared")
+        # OPTIMIZATION: Use lazy loading - don't load all clips into memory at once
+        # Instead, load clips on-demand and close them immediately after use
+        # This prevents memory exhaustion with large numbers of clips
         
         # Create video segments synced to beats
         video_segments = []
@@ -716,23 +746,77 @@ def create_beat_synced_video(
         # Hook optimization: First 3 seconds need maximum impact
         HOOK_DURATION = 3.0
         
-        for i, (start_time, end_time) in enumerate(intervals):
-            if start_time >= duration:
-                break
+        # Cache for prepared clips (limited size to prevent memory issues)
+        MAX_CACHED_CLIPS = 5  # Only keep 5 clips in memory at a time
+        clip_cache = {}  # Maps clip_path -> prepared_clip
+        cache_access_order = []  # Track access order for LRU eviction
+        
+        def get_prepared_clip(clip_path: str) -> Optional[VideoFileClip]:
+            """Get a prepared clip, using cache if available, loading if not."""
+            # Check cache first
+            if clip_path in clip_cache:
+                # Move to end (most recently used)
+                cache_access_order.remove(clip_path)
+                cache_access_order.append(clip_path)
+                return clip_cache[clip_path]
             
-            segment_duration = end_time - start_time
-            
-            # Select a clip (cycle through available clips)
-            selected_clip = prepared_clips[clip_index % len(prepared_clips)]
-            clip_index += 1
-            
-            # Get a random portion of the clip
-            if selected_clip.duration > segment_duration:
-                clip_start = random.uniform(0, selected_clip.duration - segment_duration)
-                segment = selected_clip.subclip(clip_start, clip_start + segment_duration)
-            else:
-                # Clip is shorter than needed, use it fully
-                segment = selected_clip
+            # Load clip
+            try:
+                clip = prepare_clip(clip_path)
+                
+                # If cache is full, evict least recently used
+                if len(clip_cache) >= MAX_CACHED_CLIPS and cache_access_order:
+                    lru_path = cache_access_order.pop(0)
+                    if lru_path in clip_cache:
+                        try:
+                            clip_cache[lru_path].close()
+                        except:
+                            pass
+                        del clip_cache[lru_path]
+                
+                # Add to cache
+                clip_cache[clip_path] = clip
+                cache_access_order.append(clip_path)
+                return clip
+            except Exception as e:
+                logger.warning(colored(f"[-] Error preparing clip {clip_path}: {e}", "yellow"))
+                return None
+        
+        def cleanup_clip_cache():
+            """Close all cached clips."""
+            for clip_path, clip in clip_cache.items():
+                try:
+                    clip.close()
+                except:
+                    pass
+            clip_cache.clear()
+            cache_access_order.clear()
+            gc.collect()  # Force garbage collection
+        
+        try:
+            for i, (start_time, end_time) in enumerate(intervals):
+                if start_time >= duration:
+                    break
+                
+                segment_duration = end_time - start_time
+                
+                # Select a clip path (cycle through available clips)
+                selected_clip_path = clips[clip_index % len(clips)]
+                clip_index += 1
+                
+                # Load clip on-demand
+                selected_clip = get_prepared_clip(selected_clip_path)
+                if selected_clip is None:
+                    # Skip this segment if clip couldn't be loaded
+                    continue
+                
+                # Get a random portion of the clip
+                if selected_clip.duration > segment_duration:
+                    clip_start = random.uniform(0, selected_clip.duration - segment_duration)
+                    segment = selected_clip.subclip(clip_start, clip_start + segment_duration)
+                else:
+                    # Clip is shorter than needed, use it fully
+                    segment = selected_clip.subclip(0, min(selected_clip.duration, segment_duration))
             
             # Determine if we're in hook phase (first 3 seconds)
             is_hook_phase = current_video_time < HOOK_DURATION
@@ -785,17 +869,41 @@ def create_beat_synced_video(
                 # Add time at 10% into the effect segment for best visual
                 interesting_times.append(segment_start_in_video + segment_duration * 0.1)
             
-            # Ensure segment matches exact duration
-            if segment.duration != segment_duration:
-                segment = segment.subclip(0, min(segment.duration, segment_duration))
+                # Ensure segment matches exact duration
+                if segment.duration != segment_duration:
+                    segment = segment.subclip(0, min(segment.duration, segment_duration))
+                
+                video_segments.append(segment)
+                current_video_time += segment_duration
+                
+                # Periodic cleanup to prevent memory buildup
+                if i > 0 and i % 10 == 0:  # Every 10 segments
+                    gc.collect()  # Force garbage collection
+                    if len(video_segments) > 50:  # If we have many segments, warn
+                        print(colored(f"[!] Memory optimization: {len(video_segments)} segments in memory", "yellow"))
             
-            video_segments.append(segment)
-            current_video_time += segment_duration
-        
-        # Concatenate all segments
-        print(colored(f"[+] Combining {len(video_segments)} video segments", "cyan"))
-        final_video = concatenate_videoclips(video_segments, method="compose")
-        final_video = final_video.set_fps(30)
+            if not video_segments:
+                raise ValueError("No valid video segments could be created")
+            
+            # Clean up clip cache before concatenation (frees memory)
+            cleanup_clip_cache()
+            
+            # Concatenate all segments
+            print(colored(f"[+] Combining {len(video_segments)} video segments", "cyan"))
+            final_video = concatenate_videoclips(video_segments, method="compose")
+            final_video = final_video.set_fps(30)
+            
+            # Clean up segments after concatenation (they're now in final_video)
+            for segment in video_segments:
+                try:
+                    segment.close()
+                except:
+                    pass
+            video_segments.clear()
+            gc.collect()  # Force cleanup
+        finally:
+            # Ensure cleanup even on error
+            cleanup_clip_cache()
         
         # Create and prepend interesting thumbnail
         print(colored(f"[+] Creating interesting thumbnail...", "cyan"))
@@ -855,10 +963,17 @@ def create_beat_synced_video(
         )
         
         # Clean up
-        final_video.close()
-        audio.close()
-        for clip in prepared_clips:
-            clip.close()
+        try:
+            final_video.close()
+        except:
+            pass
+        try:
+            audio.close()
+        except:
+            pass
+        
+        # Force garbage collection after cleanup
+        gc.collect()
         
         print(colored(f"[+] Music video created successfully: {output_path}", "green"))
         return output_path
