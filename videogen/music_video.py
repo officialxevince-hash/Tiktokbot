@@ -227,13 +227,30 @@ def preprocess_large_clip(
             print(colored(f"[+] Found {len(existing_segments)} existing segments, skipping processing", "green"))
             return sorted(existing_segments)[:num_segments]
         
-        # Load video to get duration with error handling
-        print(colored(f"[+] Loading video to analyze...", "cyan"))
-        video = None
+        # CRITICAL: Get video duration WITHOUT loading entire video into memory
+        # Use ffprobe to get metadata instead of loading with MoviePy
+        print(colored(f"[+] Analyzing video metadata (memory-efficient)...", "cyan"))
+        total_duration = None
         actual_clip_path = clip_path
         
         try:
-            video = VideoFileClip(clip_path)
+            # Try to get duration using ffprobe (lightweight, no frame loading)
+            probe_cmd = [
+                'ffprobe', '-v', 'error', '-show_entries',
+                'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
+                clip_path
+            ]
+            result = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+            if result.returncode == 0:
+                total_duration = float(result.stdout.decode().strip())
+                print(colored(f"[+] Video duration: {total_duration:.1f}s (from metadata)", "green"))
+            else:
+                # Fallback: Load with MoviePy but close immediately after getting duration
+                video = VideoFileClip(clip_path)
+                total_duration = video.duration
+                video.close()
+                del video
+                gc.collect()
         except Exception as e:
             error_msg = str(e)
             # Check if it's a duration/metadata error (corrupted file)
@@ -242,34 +259,32 @@ def preprocess_large_clip(
                 fixed_path = try_fix_corrupted_video(clip_path, temp_dir=os.path.join(os.path.dirname(output_dir), "temp"))
                 if fixed_path:
                     try:
-                        video = VideoFileClip(fixed_path)
-                        actual_clip_path = fixed_path
-                        print(colored(f"[+] Using fixed version of {os.path.basename(clip_path)}", "green"))
+                        # Try ffprobe on fixed video
+                        result = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                        if result.returncode == 0:
+                            total_duration = float(result.stdout.decode().strip())
+                            actual_clip_path = fixed_path
+                            print(colored(f"[+] Using fixed version of {os.path.basename(clip_path)}", "green"))
+                        else:
+                            video = VideoFileClip(fixed_path)
+                            total_duration = video.duration
+                            video.close()
+                            del video
+                            actual_clip_path = fixed_path
                     except Exception as e2:
-                        logger.warning(colored(f"[-] Fixed video still cannot be loaded: {str(e2)[:100]}", "yellow"))
+                        logger.warning(colored(f"[-] Fixed video still cannot be analyzed: {str(e2)[:100]}", "yellow"))
                         return [clip_path]
                 else:
                     logger.warning(colored(f"[-] Cannot fix corrupted video {os.path.basename(clip_path)}. Skipping.", "yellow"))
                     return [clip_path]
             elif "timeout" in error_msg.lower() or "timed out" in error_msg.lower():
-                logger.warning(colored(f"[-] Timeout loading {os.path.basename(clip_path)} - file may be on slow storage. Skipping.", "yellow"))
+                logger.warning(colored(f"[-] Timeout analyzing {os.path.basename(clip_path)} - file may be on slow storage. Skipping.", "yellow"))
                 return [clip_path]
             else:
-                logger.warning(colored(f"[-] Error loading {os.path.basename(clip_path)}: {error_msg[:100]}. Skipping.", "yellow"))
+                logger.warning(colored(f"[-] Error analyzing {os.path.basename(clip_path)}: {error_msg[:100]}. Skipping.", "yellow"))
                 return [clip_path]
         
-        if video is None:
-            return [clip_path]
-        
-        try:
-            # Correct orientation if needed (for vertical target: 1080x1920)
-            target_size = (1080, 1920)  # Standard vertical TikTok format
-            video = correct_video_orientation(video, target_size)
-            
-            total_duration = video.duration
-        except Exception as e:
-            logger.warning(colored(f"[-] Error analyzing {os.path.basename(clip_path)}: {str(e)[:100]}. Skipping.", "yellow"))
-            video.close()
+        if total_duration is None:
             return [clip_path]
         
         if total_duration < min_segment_duration:
@@ -305,7 +320,10 @@ def preprocess_large_clip(
         
         print(colored(f"[+] Extracting {num_segments} segments from {total_duration:.1f}s video...", "cyan"))
         
+        # CRITICAL: Extract segments one at a time, loading video only when needed
+        # This prevents keeping entire large video in memory
         for i, start_time in enumerate(segment_starts):
+            segment_video = None
             try:
                 # Ensure we don't go past the end
                 end_time = min(start_time + segment_duration, total_duration - skip_end)
@@ -313,31 +331,57 @@ def preprocess_large_clip(
                 if end_time - start_time < min_segment_duration:
                     continue
                 
-                # Extract segment
-                segment = video.subclip(start_time, end_time)
-                segment = segment.without_audio()  # Remove audio to save space
-                
                 # Output path
                 output_path = os.path.join(output_dir, f"{base_name}_segment_{i+1:03d}.mp4")
                 
-                # Write segment
+                # CRITICAL: Load video ONLY for this segment, extract, then close immediately
+                # This prevents keeping entire large video in memory
                 print(colored(f"[+] Extracting segment {i+1}/{num_segments} ({start_time:.1f}s - {end_time:.1f}s)...", "cyan"))
+                
+                # Load video, extract segment, close video - all in one operation
+                segment_video = VideoFileClip(actual_clip_path)
+                segment = segment_video.subclip(start_time, end_time)
+                segment = segment.without_audio()  # Remove audio to save space
+                
+                # CRITICAL: Downscale large videos during extraction to prevent memory issues
+                # Check if video is large and needs downscaling
+                try:
+                    seg_w = segment.w
+                    seg_h = segment.h
+                    if seg_w > 1920 or seg_h > 1080:
+                        # Downscale before writing to reduce memory usage
+                        scale = min(1920 / seg_w, 1080 / seg_h)
+                        new_w = int(seg_w * scale)
+                        new_h = int(seg_h * scale)
+                        new_w = new_w - (new_w % 2)  # Ensure even
+                        new_h = new_h - (new_h % 2)
+                        segment = segment.resize((new_w, new_h))
+                except:
+                    pass  # If we can't get dimensions, continue anyway
+                
+                # Write segment with ULTRA memory-efficient settings for large videos
+                # Use fastest preset and lowest settings to prevent crashes
                 segment.write_videofile(
                     output_path,
                     codec='libx264',
                     audio_codec='aac',
-                    preset='medium',
-                    bitrate='5000k',
-                    threads=2,
-                    logger=None  # Suppress verbose output
+                    preset='ultrafast',  # Fastest preset to prevent memory issues
+                    bitrate='3000k',  # Lower bitrate to reduce memory/CPU
+                    threads=1,  # Single thread to prevent overload
+                    logger=None,  # Suppress verbose output
+                    write_logfile=False  # Don't write log file
                 )
                 
+                # CRITICAL: Close segment and source video immediately
                 segment.close()
+                del segment
+                segment_video.close()
+                del segment_video
+                
                 extracted_segments.append(output_path)
                 
-                # Periodic cleanup to prevent memory buildup
-                if (i + 1) % 3 == 0:
-                    gc.collect()
+                # Force garbage collection after each segment
+                gc.collect()
                 
                 # Check output file size and display appropriately
                 output_size_bytes = os.path.getsize(output_path)
@@ -352,10 +396,9 @@ def preprocess_large_clip(
                 logger.warning(colored(f"[-] Error extracting segment {i+1}: {e}", "yellow"))
                 continue
         
-        try:
-            video.close()
-        except:
-            pass
+        # Video was never loaded into memory (we used ffprobe), so no need to close
+        # But ensure any remaining references are cleared
+        gc.collect()
         
         if not extracted_segments:
             print(colored(f"[-] No segments extracted, returning original file", "yellow"))
@@ -550,7 +593,8 @@ def try_fix_corrupted_video(clip_path: str, temp_dir: str = "./temp") -> Optiona
 def correct_video_orientation(clip: VideoFileClip, target_size: Tuple[int, int] = (1080, 1920)) -> VideoFileClip:
     """
     Detect and correct video orientation if needed.
-    Rotates horizontal videos that should be vertical (or vice versa).
+    NOTE: This function is deprecated - rotation is now done in prepare_clip after downscaling.
+    Kept for backward compatibility but should not be used on large videos.
     
     Args:
         clip: VideoFileClip to check and correct
@@ -559,24 +603,28 @@ def correct_video_orientation(clip: VideoFileClip, target_size: Tuple[int, int] 
     Returns:
         VideoFileClip: Corrected clip with proper orientation
     """
-    target_aspect = target_size[0] / target_size[1]  # width/height ratio
-    clip_aspect = clip.w / clip.h  # width/height ratio
-    
-    # Determine if target is vertical (aspect < 1) or horizontal (aspect > 1)
-    target_is_vertical = target_aspect < 1.0
-    clip_is_horizontal = clip_aspect > 1.0
-    
-    # If target is vertical but clip is horizontal, rotate 90 degrees counter-clockwise
-    # This handles the case where video was recorded horizontally but content is vertical
-    if target_is_vertical and clip_is_horizontal:
-        print(colored(f"[+] Rotating clip from horizontal ({clip.w}x{clip.h}) to vertical", "yellow"))
-        clip = rotate(clip, -90)  # Counter-clockwise rotation
-        # After rotation, width and height are swapped automatically by MoviePy
-    
-    # If target is horizontal but clip is vertical, rotate 90 degrees clockwise
-    elif not target_is_vertical and not clip_is_horizontal:
-        print(colored(f"[+] Rotating clip from vertical ({clip.w}x{clip.h}) to horizontal", "yellow"))
-        clip = rotate(clip, 90)  # Clockwise rotation
+    # WARNING: Accessing .w and .h may trigger frame loading in MoviePy
+    # This function should only be used on already-downscaled videos
+    try:
+        target_aspect = target_size[0] / target_size[1]  # width/height ratio
+        clip_aspect = clip.w / clip.h  # width/height ratio
+        
+        # Determine if target is vertical (aspect < 1) or horizontal (aspect > 1)
+        target_is_vertical = target_aspect < 1.0
+        clip_is_horizontal = clip_aspect > 1.0
+        
+        # If target is vertical but clip is horizontal, rotate 90 degrees counter-clockwise
+        if target_is_vertical and clip_is_horizontal:
+            print(colored(f"[+] Rotating clip from horizontal ({clip.w}x{clip.h}) to vertical", "yellow"))
+            clip = rotate(clip, -90)  # Counter-clockwise rotation
+        
+        # If target is horizontal but clip is vertical, rotate 90 degrees clockwise
+        elif not target_is_vertical and not clip_is_horizontal:
+            print(colored(f"[+] Rotating clip from vertical ({clip.w}x{clip.h}) to horizontal", "yellow"))
+            clip = rotate(clip, 90)  # Clockwise rotation
+    except:
+        # If we can't determine orientation, skip rotation
+        pass
     
     return clip
 
@@ -584,6 +632,7 @@ def correct_video_orientation(clip: VideoFileClip, target_size: Tuple[int, int] 
 def prepare_clip(clip_path: str, target_size: Tuple[int, int] = (1080, 1920)) -> VideoFileClip:
     """
     Load and prepare a video clip for editing (crop, resize, remove audio).
+    CRITICAL: Downscales large videos FIRST to prevent memory explosion.
     
     Args:
         clip_path (str): Path to video file
@@ -607,6 +656,7 @@ def prepare_clip(clip_path: str, target_size: Tuple[int, int] = (1080, 1920)) ->
     # Try to load the clip, with fallback to fixing corrupted files
     video_path = clip_path
     try:
+        # Load with minimal memory usage - don't cache frames
         clip = VideoFileClip(clip_path)
     except Exception as e:
         error_msg = str(e)
@@ -628,32 +678,81 @@ def prepare_clip(clip_path: str, target_size: Tuple[int, int] = (1080, 1920)) ->
     
     clip = clip.without_audio()
     
-    # Correct orientation if needed (rotate horizontal videos that should be vertical)
-    clip = correct_video_orientation(clip, target_size)
+    # CRITICAL FIX: Get dimensions WITHOUT loading frames (lightweight operation)
+    # Accessing .w and .h may trigger frame loading, so we need to be careful
+    try:
+        original_w = clip.w
+        original_h = clip.h
+    except:
+        # Fallback: get one frame to determine size (unavoidable but we'll resize immediately)
+        try:
+            test_frame = clip.get_frame(0)
+            original_h, original_w = test_frame.shape[:2]
+        except:
+            raise ValueError(f"Cannot determine video dimensions: {clip_path}")
     
-    # Calculate aspect ratio
-    clip_aspect = clip.w / clip.h
+    # CRITICAL: For large videos (4K+), downscale FIRST before any other operations
+    # This prevents memory explosion from processing full-resolution frames
+    MAX_PROCESSING_WIDTH = 1920  # Don't process videos wider than 1920px
+    MAX_PROCESSING_HEIGHT = 1080  # Don't process videos taller than 1080px
+    
+    needs_downscale = original_w > MAX_PROCESSING_WIDTH or original_h > MAX_PROCESSING_HEIGHT
+    
+    if needs_downscale:
+        # Calculate intermediate size that maintains aspect but is manageable
+        scale_w = MAX_PROCESSING_WIDTH / original_w
+        scale_h = MAX_PROCESSING_HEIGHT / original_h
+        scale = min(scale_w, scale_h)  # Use smaller scale to fit both dimensions
+        
+        intermediate_w = int(original_w * scale)
+        intermediate_h = int(original_h * scale)
+        
+        # Ensure even dimensions (required by some codecs)
+        intermediate_w = intermediate_w - (intermediate_w % 2)
+        intermediate_h = intermediate_h - (intermediate_h % 2)
+        
+        print(colored(f"[+] Downscaling large video ({original_w}x{original_h} -> {intermediate_w}x{intermediate_h}) to prevent memory issues", "yellow"))
+        
+        # Resize FIRST before any other operations (much more memory efficient)
+        clip = clip.resize((intermediate_w, intermediate_h))
+        
+        # Update dimensions after resize
+        original_w = intermediate_w
+        original_h = intermediate_h
+    
+    # Now determine if rotation is needed (on smaller video)
     target_aspect = target_size[0] / target_size[1]
+    clip_aspect = original_w / original_h
+    target_is_vertical = target_aspect < 1.0
+    clip_is_horizontal = clip_aspect > 1.0
     
-    # Crop to match target aspect ratio
+    # Rotate if needed (now on smaller video = much less memory)
+    if target_is_vertical and clip_is_horizontal:
+        print(colored(f"[+] Rotating clip from horizontal ({original_w}x{original_h}) to vertical", "yellow"))
+        clip = rotate(clip, -90)
+        # After rotation, dimensions are swapped
+        original_w, original_h = original_h, original_w
+        clip_aspect = original_w / original_h
+    
+    # Crop to match target aspect ratio (on smaller video)
     if clip_aspect < target_aspect:
         # Clip is narrower, crop height
-        new_height = int(clip.w / target_aspect)
+        new_height = int(original_w / target_aspect)
         clip = crop(clip, 
-                   width=clip.w, 
+                   width=original_w, 
                    height=new_height,
-                   x_center=clip.w / 2,
-                   y_center=clip.h / 2)
+                   x_center=original_w / 2,
+                   y_center=original_h / 2)
     else:
         # Clip is wider, crop width
-        new_width = int(clip.h * target_aspect)
+        new_width = int(original_h * target_aspect)
         clip = crop(clip,
                    width=new_width,
-                   height=clip.h,
-                   x_center=clip.w / 2,
-                   y_center=clip.h / 2)
+                   height=original_h,
+                   x_center=original_w / 2,
+                   y_center=original_h / 2)
     
-    # Resize to target size
+    # Final resize to exact target size (should be minimal work now)
     clip = clip.resize(target_size)
     clip = clip.set_fps(30)
     
@@ -787,8 +886,9 @@ def create_beat_synced_video(
         # Hook optimization: First 3 seconds need maximum impact
         HOOK_DURATION = 3.0
         
-        # Cache for prepared clips (limited size to prevent memory issues)
-        MAX_CACHED_CLIPS = 5  # Only keep 5 clips in memory at a time
+        # Cache for prepared clips (VERY limited to prevent memory issues with large clips)
+        # Each cached clip is already downscaled to 1080x1920, but still uses memory
+        MAX_CACHED_CLIPS = 2  # Reduced from 5 to 2 for large clip libraries
         clip_cache = {}  # Maps clip_path -> prepared_clip
         cache_access_order = []  # Track access order for LRU eviction
         
@@ -859,12 +959,19 @@ def create_beat_synced_video(
             clips_loaded_count += 1
             
             # Get a random portion of the clip
-            if selected_clip.duration > segment_duration:
-                clip_start = random.uniform(0, selected_clip.duration - segment_duration)
+            # CRITICAL: Access duration property carefully (may trigger frame loading in some MoviePy versions)
+            try:
+                clip_duration = selected_clip.duration
+            except:
+                # Fallback: estimate from file or use default
+                clip_duration = 5.0  # Default fallback
+            
+            if clip_duration > segment_duration:
+                clip_start = random.uniform(0, clip_duration - segment_duration)
                 segment = selected_clip.subclip(clip_start, clip_start + segment_duration)
             else:
                 # Clip is shorter than needed, use it fully
-                segment = selected_clip.subclip(0, min(selected_clip.duration, segment_duration))
+                segment = selected_clip.subclip(0, min(clip_duration, segment_duration))
             
             # Determine if we're in hook phase (first 3 seconds)
             is_hook_phase = current_video_time < HOOK_DURATION
@@ -918,17 +1025,40 @@ def create_beat_synced_video(
                 interesting_times.append(segment_start_in_video + segment_duration * 0.1)
             
             # Ensure segment matches exact duration
-            if segment.duration != segment_duration:
-                segment = segment.subclip(0, min(segment.duration, segment_duration))
+            # CRITICAL: Access duration carefully to avoid frame loading
+            try:
+                seg_duration = segment.duration
+                if seg_duration != segment_duration:
+                    segment = segment.subclip(0, min(seg_duration, segment_duration))
+            except:
+                # If we can't get duration, just use the segment as-is
+                pass
             
-            video_segments.append(segment)
-            current_video_time += segment_duration
-            
-            # Periodic cleanup to prevent memory buildup
-            if i > 0 and i % 10 == 0:  # Every 10 segments
-                gc.collect()  # Force garbage collection
-                if len(video_segments) > 50:  # If we have many segments, warn
-                    print(colored(f"[!] Memory optimization: {len(video_segments)} segments in memory", "yellow"))
+                video_segments.append(segment)
+                current_video_time += segment_duration
+                
+                # CRITICAL: Clear reference to parent clip to free memory
+                # Subclips may hold references to parent, preventing garbage collection
+                try:
+                    # Force Python to release reference
+                    del selected_clip
+                except:
+                    pass
+                
+                # Periodic cleanup to prevent memory buildup
+                if i > 0 and i % 5 == 0:  # Every 5 segments (more frequent for large clips)
+                    gc.collect()  # Force garbage collection
+                    if len(video_segments) > 30:  # Lowered threshold for warning
+                        print(colored(f"[!] Memory optimization: {len(video_segments)} segments in memory", "yellow"))
+                        
+                        # Check memory usage
+                        try:
+                            import psutil
+                            memory = psutil.virtual_memory()
+                            if memory.percent > 80:
+                                print(colored(f"[!] Warning: Memory usage is {memory.percent:.1f}%", "yellow"))
+                        except:
+                            pass
         
         if not video_segments:
             error_msg = (

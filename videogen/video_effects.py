@@ -17,9 +17,10 @@ import random
 def apply_zoom_effect(clip: VideoClip, zoom_factor: float = 1.2, duration: float = 0.1) -> VideoClip:
     """
     Apply a zoom effect to a video clip.
+    NOTE: Clip should already be downscaled to target resolution (1080x1920) before applying effects.
     
     Args:
-        clip: VideoClip to apply effect to
+        clip: VideoClip to apply effect to (should be 1080x1920 or smaller)
         zoom_factor: How much to zoom (1.0 = no zoom, 1.5 = 50% zoom)
         duration: Duration of the zoom effect
     
@@ -36,12 +37,12 @@ def apply_zoom_effect(clip: VideoClip, zoom_factor: float = 1.2, duration: float
     
     def make_frame(get_frame, t):
         scale = zoom_func(t)
-        w, h = clip.size
+        # Get frame first (lightweight if clip is already downscaled)
+        frame = get_frame(t)
+        h, w = frame.shape[:2]  # Get dimensions from frame, not clip (avoids property access)
+        
         new_w = int(w * scale)
         new_h = int(h * scale)
-        
-        # Get the frame at time t
-        frame = get_frame(t)
         
         # Resize the frame using PIL
         from PIL import Image
@@ -75,12 +76,15 @@ def apply_flash_effect(clip: VideoClip, flash_duration: float = 0.05) -> VideoCl
     from moviepy.editor import ColorClip
     
     def make_frame(get_frame, t):
+        # Get frame first to determine dimensions (avoids accessing clip.w/clip.h)
+        frame = get_frame(t)
+        h, w = frame.shape[:2]
+        
         if t < flash_duration:
             # White flash
-            return np.full((clip.h, clip.w, 3), 255, dtype=np.uint8)
+            return np.full((h, w, 3), 255, dtype=np.uint8)
         else:
             # Normal video with slight brightness boost
-            frame = get_frame(t)
             if t < flash_duration * 2:
                 # Gradual fade from white
                 fade_factor = (t - flash_duration) / flash_duration
