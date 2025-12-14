@@ -609,9 +609,10 @@ if __name__ == "__main__":
 	# print(xbogus)
 
 	path = os.path.join(os.getcwd(), "tiktok-signature", "browser.js")
-	# Use bot_utils helper to find node/bun executable
+	# Use bot_utils helper - automatically uses node for playwright scripts
 	from tiktok_uploader.bot_utils import _find_node_executable
-	node_exec = _find_node_executable()
+	# Playwright scripts need node (bun has compatibility issues)
+	node_exec = _find_node_executable(prefer_node=True)
 	if node_exec is None:
 		raise FileNotFoundError(
 			"Node.js runtime not found. Please install bun (recommended) or node.\n"

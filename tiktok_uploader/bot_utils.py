@@ -6,12 +6,26 @@ import os
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
-def _find_node_executable():
+def _find_node_executable(prefer_node=False):
 	"""
 	Find Node.js executable, preferring bun over node.
-	Returns the executable path or None if not found.
+	
+	Args:
+		prefer_node: If True, prefer node over bun (useful for playwright compatibility)
+	
+	Returns:
+		The executable path or None if not found.
 	"""
-	# Prefer bun (as per user preference)
+	# For playwright-dependent code, prefer node due to compatibility issues
+	if prefer_node:
+		if shutil.which('node'):
+			return 'node'
+		# Fall back to bun if node not available
+		if shutil.which('bun'):
+			return 'bun'
+		return None
+	
+	# Default: Prefer bun (as per user preference)
 	if shutil.which('bun'):
 		return 'bun'
 	
@@ -25,6 +39,7 @@ def _find_node_executable():
 def subprocess_jsvmp(js, user_agent, url):
 	"""
 	Execute JavaScript file using bun (preferred) or node (fallback).
+	Automatically uses node for playwright-dependent scripts due to compatibility.
 	
 	Args:
 		js: Path to JavaScript file
@@ -37,7 +52,31 @@ def subprocess_jsvmp(js, user_agent, url):
 	Raises:
 		FileNotFoundError: If neither bun nor node is available
 	"""
-	node_exec = _find_node_executable()
+	# Check if this is a playwright-dependent script
+	# Playwright has compatibility issues with bun, so use node for those
+	js_dir = os.path.dirname(js) if os.path.dirname(js) else os.getcwd()
+	js_path_lower = js.lower()
+	playwright_detected = False
+	
+	# Detect playwright usage - tiktok-signature always uses playwright
+	if 'tiktok-signature' in js_dir or 'tiktok-signature' in js_path_lower:
+		playwright_detected = True
+	else:
+		# Check for playwright in package.json
+		package_json = os.path.join(js_dir, 'package.json')
+		if os.path.exists(package_json):
+			try:
+				import json
+				with open(package_json, 'r') as f:
+					pkg = json.load(f)
+					deps = pkg.get('dependencies', {})
+					if 'playwright' in str(deps).lower() or 'playwright-chromium' in deps:
+						playwright_detected = True
+			except:
+				pass
+	
+	# Use node for playwright scripts, bun for others
+	node_exec = _find_node_executable(prefer_node=playwright_detected)
 	
 	if node_exec is None:
 		error_msg = (
@@ -59,6 +98,29 @@ def subprocess_jsvmp(js, user_agent, url):
 		
 		if proc.returncode != 0:
 			error_output = stderr.decode('utf-8') if stderr else "Unknown error"
+			
+			# If bun failed with playwright error, suggest using node
+			if 'playwright' in error_output.lower() and node_exec == 'bun':
+				error_msg = (
+					f"JavaScript execution failed with bun (playwright compatibility issue).\n"
+					f"Error: {error_output}\n\n"
+					f"Trying to fall back to node..."
+				)
+				# Try with node as fallback
+				if shutil.which('node'):
+					try:
+						proc = subprocess.Popen(
+							['node', js, url, user_agent],
+							stdout=subprocess.PIPE,
+							stderr=subprocess.PIPE,
+							cwd=os.path.dirname(js) if os.path.dirname(js) else None
+						)
+						stdout, stderr = proc.communicate()
+						if proc.returncode == 0:
+							return stdout.decode('utf-8')
+					except:
+						pass
+			
 			raise RuntimeError(f"JavaScript execution failed ({node_exec}): {error_output}")
 		
 		return stdout.decode('utf-8')
