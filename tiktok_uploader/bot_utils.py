@@ -1,12 +1,76 @@
 import secrets, string, zlib, re, subprocess
+import shutil
+import os
 
 
 user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 
+def _find_node_executable():
+	"""
+	Find Node.js executable, preferring bun over node.
+	Returns the executable path or None if not found.
+	"""
+	# Prefer bun (as per user preference)
+	if shutil.which('bun'):
+		return 'bun'
+	
+	# Fall back to node
+	if shutil.which('node'):
+		return 'node'
+	
+	return None
+
+
 def subprocess_jsvmp(js, user_agent, url):
-	proc = subprocess.Popen(['node', js, url, user_agent], stdout=subprocess.PIPE)
-	return proc.stdout.read().decode('utf-8')
+	"""
+	Execute JavaScript file using bun (preferred) or node (fallback).
+	
+	Args:
+		js: Path to JavaScript file
+		user_agent: User agent string
+		url: URL to process
+	
+	Returns:
+		Output from JavaScript execution as string
+	
+	Raises:
+		FileNotFoundError: If neither bun nor node is available
+	"""
+	node_exec = _find_node_executable()
+	
+	if node_exec is None:
+		error_msg = (
+			"Node.js runtime not found. Please install one of the following:\n"
+			"  - bun (recommended): curl -fsSL https://bun.sh/install | bash\n"
+			"  - node: https://nodejs.org/\n"
+			"After installation, make sure it's in your PATH."
+		)
+		raise FileNotFoundError(error_msg)
+	
+	try:
+		proc = subprocess.Popen(
+			[node_exec, js, url, user_agent],
+			stdout=subprocess.PIPE,
+			stderr=subprocess.PIPE,
+			cwd=os.path.dirname(js) if os.path.dirname(js) else None
+		)
+		stdout, stderr = proc.communicate()
+		
+		if proc.returncode != 0:
+			error_output = stderr.decode('utf-8') if stderr else "Unknown error"
+			raise RuntimeError(f"JavaScript execution failed ({node_exec}): {error_output}")
+		
+		return stdout.decode('utf-8')
+	except FileNotFoundError:
+		# Re-raise with better error message
+		error_msg = (
+			f"Node.js runtime ({node_exec}) not found in PATH. Please install:\n"
+			"  - bun (recommended): curl -fsSL https://bun.sh/install | bash\n"
+			"  - node: https://nodejs.org/\n"
+			"After installation, restart the bot."
+		)
+		raise FileNotFoundError(error_msg)
 
 
 def generate_random_string(length, underline):

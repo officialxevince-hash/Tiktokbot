@@ -609,8 +609,21 @@ if __name__ == "__main__":
 	# print(xbogus)
 
 	path = os.path.join(os.getcwd(), "tiktok-signature", "browser.js")
-	proc = subprocess.Popen(['node', path , base_url+url, "agent123"], stdout=subprocess.PIPE)
-	output = proc.stdout.read().decode('utf-8')
+	# Use bot_utils helper to find node/bun executable
+	from tiktok_uploader.bot_utils import _find_node_executable
+	node_exec = _find_node_executable()
+	if node_exec is None:
+		raise FileNotFoundError(
+			"Node.js runtime not found. Please install bun (recommended) or node.\n"
+			"bun: curl -fsSL https://bun.sh/install | bash\n"
+			"node: https://nodejs.org/"
+		)
+	proc = subprocess.Popen([node_exec, path, base_url+url, "agent123"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+	stdout, stderr = proc.communicate()
+	if proc.returncode != 0:
+		error_output = stderr.decode('utf-8') if stderr else "Unknown error"
+		raise RuntimeError(f"JavaScript execution failed ({node_exec}): {error_output}")
+	output = stdout.decode('utf-8')
 	json_output = json.loads(output)["data"]
 	print(json_output)
 	print(f"X-Bogus: {json_output['x-bogus']}\n"
