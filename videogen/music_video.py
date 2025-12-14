@@ -727,8 +727,46 @@ def create_beat_synced_video(
         
         print(colored(f"[+] Using {len(beats)} beats for synchronization", "green"))
         
+        # OPTIMIZATION: Limit number of beats to prevent too many segments
+        # Too many segments = very slow rendering and high memory usage
+        max_beats = int(duration * 2.5)  # Max 2.5 beats per second (reasonable for most music)
+        if len(beats) > max_beats:
+            print(colored(f"[!] Too many beats ({len(beats)}), limiting to {max_beats} to prevent slow rendering", "yellow"))
+            # Use every Nth beat to reduce count
+            step = len(beats) // max_beats
+            beats = beats[::step][:max_beats]
+            print(colored(f"[+] Using {len(beats)} beats (every {step} beats)", "green"))
+        
         # Get beat intervals
         intervals = get_beat_intervals(beats, duration)
+        
+        # OPTIMIZATION: Combine very short intervals to reduce segment count
+        min_segment_duration = 0.3  # Minimum 0.3 seconds per segment
+        combined_intervals = []
+        current_start = None
+        current_end = None
+        
+        for start, end in intervals:
+            segment_duration = end - start
+            if current_start is None:
+                current_start = start
+                current_end = end
+            elif (current_end - current_start) < min_segment_duration:
+                # Combine with previous if too short
+                current_end = end
+            else:
+                # Save previous and start new
+                combined_intervals.append((current_start, current_end))
+                current_start = start
+                current_end = end
+        
+        # Add last interval
+        if current_start is not None:
+            combined_intervals.append((current_start, current_end))
+        
+        if len(combined_intervals) < len(intervals):
+            print(colored(f"[+] Combined intervals: {len(intervals)} -> {len(combined_intervals)} segments", "green"))
+            intervals = combined_intervals
         
         # Validate clips
         if not clips:
@@ -1085,24 +1123,33 @@ def create_beat_synced_video(
         except:
             pass  # Resource manager not available, continue anyway
         
-        # Use ULTRA-CONSERVATIVE settings to prevent system crashes
-        # Always use fast/ultrafast preset and lower bitrate to reduce resource usage
+        # Use balanced settings: safe but not too slow
+        # Too slow = appears frozen, too fast = crashes system
         video_duration = final_video.duration
-        is_large_video = video_duration > 20 or len(video_segments) > 30  # Lowered thresholds
+        num_segments = len(video_segments)
+        is_large_video = video_duration > 30 or num_segments > 60
         
-        # Default to safest settings to prevent crashes
-        render_preset = 'ultrafast'  # Always use ultrafast to prevent crashes
-        render_bitrate = '4000k'  # Lower bitrate to reduce CPU/memory
-        render_threads = 1  # Single thread to prevent overload
-        
-        if not is_large_video:
-            # Only for very small videos, use slightly better settings
-            render_preset = 'fast'
+        # Adaptive settings based on video complexity
+        if num_segments > 100:
+            # Very many segments - use safest settings
+            render_preset = 'ultrafast'
+            render_bitrate = '4000k'
+            render_threads = 1
+            print(colored(f"[!] Many segments ({num_segments}), using safest settings", "yellow"))
+        elif num_segments > 60 or is_large_video:
+            # Many segments or long video - use safe settings
+            render_preset = 'veryfast'
             render_bitrate = '5000k'
-            render_threads = min(threads, 1)  # Still limit to 1 thread
+            render_threads = min(threads, 2)
+            print(colored(f"[!] Moderate complexity ({num_segments} segments), using safe settings", "yellow"))
+        else:
+            # Fewer segments - can use slightly faster settings
+            render_preset = 'fast'
+            render_bitrate = '6000k'
+            render_threads = min(threads, 2)
+            print(colored(f"[!] Lower complexity ({num_segments} segments), using balanced settings", "yellow"))
         
-        print(colored(f"[!] Using ULTRA-SAFE rendering settings to prevent system crashes", "yellow"))
-        print(colored(f"[!] Preset: {render_preset}, Bitrate: {render_bitrate}, Threads: {render_threads}", "yellow"))
+        print(colored(f"[!] Rendering settings: Preset={render_preset}, Bitrate={render_bitrate}, Threads={render_threads}", "cyan"))
         
         # Render with progress monitoring, timeout, and error handling
         max_retries = 2
@@ -1115,6 +1162,9 @@ def create_beat_synced_video(
             no_progress_count = 0
             max_no_progress_seconds = 90  # If no progress for 90 seconds, consider frozen
             check_interval = 10  # Check every 10 seconds
+            # Capture render settings for progress calculation
+            current_preset = render_preset
+            current_bitrate = render_bitrate
             
             # Start progress monitoring thread
             progress_monitor_active = threading.Event()
@@ -1167,8 +1217,21 @@ def create_beat_synced_video(
                                 no_progress_count = 0
                                 size_mb = current_size / (1024 ** 2)
                                 elapsed = time.time() - render_start_time
-                                progress_pct = min(100, (current_size / max(1, video_duration * 4000000)) * 100)  # Adjusted for lower bitrate
-                                print(colored(f"[!] Rendering: {size_mb:.1f} MB (~{progress_pct:.0f}%) - {elapsed:.0f}s elapsed", "cyan"))
+                                # Better progress estimation based on expected file size
+                                # Estimate: bitrate (kbps) * duration (s) / 8 = bytes
+                                try:
+                                    bitrate_kbps = int(current_bitrate.replace('k', ''))
+                                    expected_size_bytes = (bitrate_kbps * 1000 * video_duration) / 8
+                                    progress_pct = min(100, (current_size / max(1, expected_size_bytes)) * 100)
+                                    remaining_estimate = (elapsed / max(0.01, progress_pct / 100)) - elapsed if progress_pct > 1 else 0
+                                    print(colored(
+                                        f"[!] Rendering: {size_mb:.1f} MB (~{progress_pct:.0f}%) - "
+                                        f"{elapsed:.0f}s elapsed, ~{remaining_estimate:.0f}s remaining",
+                                        "cyan"
+                                    ))
+                                except:
+                                    # Fallback if calculation fails
+                                    print(colored(f"[!] Rendering: {size_mb:.1f} MB - {elapsed:.0f}s elapsed", "cyan"))
                             else:
                                 # No progress
                                 no_progress_count += 1
