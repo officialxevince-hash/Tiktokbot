@@ -794,6 +794,9 @@ def create_beat_synced_video(
             gc.collect()  # Force garbage collection
         
         try:
+            clips_loaded_count = 0
+            clips_failed_count = 0
+            
             for i, (start_time, end_time) in enumerate(intervals):
                 if start_time >= duration:
                     break
@@ -808,7 +811,12 @@ def create_beat_synced_video(
                 selected_clip = get_prepared_clip(selected_clip_path)
                 if selected_clip is None:
                     # Skip this segment if clip couldn't be loaded
+                    clips_failed_count += 1
+                    if clips_failed_count <= 3:  # Only log first few failures to avoid spam
+                        logger.warning(colored(f"[-] Skipping segment {i+1}: Could not load clip {os.path.basename(selected_clip_path)}", "yellow"))
                     continue
+                
+                clips_loaded_count += 1
                 
                 # Get a random portion of the clip
                 if selected_clip.duration > segment_duration:
@@ -817,58 +825,58 @@ def create_beat_synced_video(
                 else:
                     # Clip is shorter than needed, use it fully
                     segment = selected_clip.subclip(0, min(selected_clip.duration, segment_duration))
-            
-            # Determine if we're in hook phase (first 3 seconds)
-            is_hook_phase = current_video_time < HOOK_DURATION
-            is_finish_phase = current_video_time >= duration * 0.9
-            
-            # Adjust effect intensity based on phase
-            if is_hook_phase:
-                # Hook phase: Maximum intensity, prefer flash and zoom
-                phase_intensity = min(1.0, effect_intensity * 1.5)
-                effect_choices = ['flash', 'zoom', 'prism', 'zoom', 'flash']  # Weighted towards flash/zoom
-            elif is_finish_phase:
-                # Finish phase: High intensity for strong ending
-                phase_intensity = min(1.0, effect_intensity * 1.2)
-                effect_choices = ['zoom', 'flash', 'prism', 'rgb', 'jump_cut', 'none']
-            else:
-                # Middle phase: Normal intensity
-                phase_intensity = effect_intensity
-                effect_choices = ['zoom', 'flash', 'rgb', 'prism', 'jump_cut', 'fast_cut', 'none']
-            
-            # Apply effects based on beat position and phase
-            effect_type = random.choice(effect_choices)
-            
-            has_effect = False
-            if effect_type == 'zoom' and random.random() < phase_intensity:
-                zoom_factor = 1.3 if is_hook_phase else (1.2 + random.uniform(0, 0.3))
-                segment = apply_zoom_effect(segment, zoom_factor=zoom_factor)
-                has_effect = True
-            elif effect_type == 'flash' and random.random() < phase_intensity:
-                flash_duration = 0.08 if is_hook_phase else 0.05  # Longer flash in hook
-                segment = apply_flash_effect(segment, flash_duration=flash_duration)
-                has_effect = True
-            elif effect_type == 'rgb' and random.random() < phase_intensity:
-                segment = apply_rgb_shift(segment, shift_amount=random.randint(3, 10))
-                has_effect = True
-            elif effect_type == 'prism' and random.random() < phase_intensity:
-                prism_intensity = 0.5 if is_hook_phase else (0.3 + random.uniform(0, 0.4))
-                segment = apply_prism_effect(segment, intensity=prism_intensity)
-                has_effect = True
-            elif effect_type == 'jump_cut' and random.random() < phase_intensity * 0.5:
-                segment = apply_jump_cut(segment, jump_duration=0.1)
-                has_effect = True
-            elif effect_type == 'fast_cut' and random.random() < phase_intensity * 0.3:
-                segment = apply_fast_cut(segment, cut_duration=0.05)
-                has_effect = True
-            
-            # Track interesting moments (prefer flash and zoom effects for thumbnails)
-            if has_effect and (effect_type == 'flash' or effect_type == 'zoom' or effect_type == 'prism'):
-                # Store the time when this effect segment starts (relative to final video)
-                segment_start_in_video = current_video_time
-                # Add time at 10% into the effect segment for best visual
-                interesting_times.append(segment_start_in_video + segment_duration * 0.1)
-            
+                
+                # Determine if we're in hook phase (first 3 seconds)
+                is_hook_phase = current_video_time < HOOK_DURATION
+                is_finish_phase = current_video_time >= duration * 0.9
+                
+                # Adjust effect intensity based on phase
+                if is_hook_phase:
+                    # Hook phase: Maximum intensity, prefer flash and zoom
+                    phase_intensity = min(1.0, effect_intensity * 1.5)
+                    effect_choices = ['flash', 'zoom', 'prism', 'zoom', 'flash']  # Weighted towards flash/zoom
+                elif is_finish_phase:
+                    # Finish phase: High intensity for strong ending
+                    phase_intensity = min(1.0, effect_intensity * 1.2)
+                    effect_choices = ['zoom', 'flash', 'prism', 'rgb', 'jump_cut', 'none']
+                else:
+                    # Middle phase: Normal intensity
+                    phase_intensity = effect_intensity
+                    effect_choices = ['zoom', 'flash', 'rgb', 'prism', 'jump_cut', 'fast_cut', 'none']
+                
+                # Apply effects based on beat position and phase
+                effect_type = random.choice(effect_choices)
+                
+                has_effect = False
+                if effect_type == 'zoom' and random.random() < phase_intensity:
+                    zoom_factor = 1.3 if is_hook_phase else (1.2 + random.uniform(0, 0.3))
+                    segment = apply_zoom_effect(segment, zoom_factor=zoom_factor)
+                    has_effect = True
+                elif effect_type == 'flash' and random.random() < phase_intensity:
+                    flash_duration = 0.08 if is_hook_phase else 0.05  # Longer flash in hook
+                    segment = apply_flash_effect(segment, flash_duration=flash_duration)
+                    has_effect = True
+                elif effect_type == 'rgb' and random.random() < phase_intensity:
+                    segment = apply_rgb_shift(segment, shift_amount=random.randint(3, 10))
+                    has_effect = True
+                elif effect_type == 'prism' and random.random() < phase_intensity:
+                    prism_intensity = 0.5 if is_hook_phase else (0.3 + random.uniform(0, 0.4))
+                    segment = apply_prism_effect(segment, intensity=prism_intensity)
+                    has_effect = True
+                elif effect_type == 'jump_cut' and random.random() < phase_intensity * 0.5:
+                    segment = apply_jump_cut(segment, jump_duration=0.1)
+                    has_effect = True
+                elif effect_type == 'fast_cut' and random.random() < phase_intensity * 0.3:
+                    segment = apply_fast_cut(segment, cut_duration=0.05)
+                    has_effect = True
+                
+                # Track interesting moments (prefer flash and zoom effects for thumbnails)
+                if has_effect and (effect_type == 'flash' or effect_type == 'zoom' or effect_type == 'prism'):
+                    # Store the time when this effect segment starts (relative to final video)
+                    segment_start_in_video = current_video_time
+                    # Add time at 10% into the effect segment for best visual
+                    interesting_times.append(segment_start_in_video + segment_duration * 0.1)
+                
                 # Ensure segment matches exact duration
                 if segment.duration != segment_duration:
                     segment = segment.subclip(0, min(segment.duration, segment_duration))
@@ -883,7 +891,15 @@ def create_beat_synced_video(
                         print(colored(f"[!] Memory optimization: {len(video_segments)} segments in memory", "yellow"))
             
             if not video_segments:
-                raise ValueError("No valid video segments could be created")
+                error_msg = (
+                    f"No valid video segments could be created. "
+                    f"Clips loaded: {clips_loaded_count}, Clips failed: {clips_failed_count}, "
+                    f"Total intervals: {len(intervals)}, Total clips available: {len(clips)}"
+                )
+                logger.error(colored(f"[-] {error_msg}", "red"))
+                raise ValueError(error_msg)
+            
+            print(colored(f"[+] Successfully created {len(video_segments)} video segments from {clips_loaded_count} clips", "green"))
             
             # Clean up clip cache before concatenation (frees memory)
             cleanup_clip_cache()
