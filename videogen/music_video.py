@@ -1034,31 +1034,32 @@ def create_beat_synced_video(
                 # If we can't get duration, just use the segment as-is
                 pass
             
-                video_segments.append(segment)
-                current_video_time += segment_duration
-                
-                # CRITICAL: Clear reference to parent clip to free memory
-                # Subclips may hold references to parent, preventing garbage collection
-                try:
-                    # Force Python to release reference
-                    del selected_clip
-                except:
-                    pass
-                
-                # Periodic cleanup to prevent memory buildup
-                if i > 0 and i % 5 == 0:  # Every 5 segments (more frequent for large clips)
-                    gc.collect()  # Force garbage collection
-                    if len(video_segments) > 30:  # Lowered threshold for warning
-                        print(colored(f"[!] Memory optimization: {len(video_segments)} segments in memory", "yellow"))
-                        
-                        # Check memory usage
-                        try:
-                            import psutil
-                            memory = psutil.virtual_memory()
-                            if memory.percent > 80:
-                                print(colored(f"[!] Warning: Memory usage is {memory.percent:.1f}%", "yellow"))
-                        except:
-                            pass
+            # CRITICAL: Append segment AFTER duration check (not inside try/except)
+            video_segments.append(segment)
+            current_video_time += segment_duration
+            
+            # CRITICAL: Clear reference to parent clip to free memory
+            # Subclips may hold references to parent, preventing garbage collection
+            try:
+                # Force Python to release reference
+                del selected_clip
+            except:
+                pass
+            
+            # Periodic cleanup to prevent memory buildup
+            if i > 0 and i % 5 == 0:  # Every 5 segments (more frequent for large clips)
+                gc.collect()  # Force garbage collection
+                if len(video_segments) > 30:  # Lowered threshold for warning
+                    print(colored(f"[!] Memory optimization: {len(video_segments)} segments in memory", "yellow"))
+                    
+                    # Check memory usage
+                    try:
+                        import psutil
+                        memory = psutil.virtual_memory()
+                        if memory.percent > 80:
+                            print(colored(f"[!] Warning: Memory usage is {memory.percent:.1f}%", "yellow"))
+                    except:
+                        pass
         
         if not video_segments:
             error_msg = (

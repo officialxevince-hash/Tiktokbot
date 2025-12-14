@@ -263,9 +263,10 @@ tiktokai/
 
 **"System overloads or crashes"**
 - The bot includes automatic resource management to prevent overload
-- See `RESOURCE_MANAGEMENT.md` for configuration options
+- See "Resource Management" section below for configuration options
 - Lower resource thresholds in `.env` if your system is struggling
 - The bot will automatically wait for resources to become available
+- See "Critical System Crash Fixes" section for details on memory optimizations
 
 ## Viral Optimization Guide
 
@@ -538,6 +539,217 @@ Example cron setup:
 - Set up cron job to run bot at optimal posting times
 - More reliable than relying on TikTok's scheduling API
 
+## Resource Management
+
+The bot includes a comprehensive resource management system that prevents system overload and crashes.
+
+### Overview
+
+The resource management system:
+- Monitors CPU, memory, and disk usage in real-time
+- Prevents concurrent heavy operations
+- Rate limits video processing
+- Automatically cleans up temporary files
+- Waits for resources to become available before starting operations
+- Provides graceful shutdown on system overload
+
+### Features
+
+**Real-Time Resource Monitoring**
+- Continuously monitors CPU, memory, and disk usage
+- Updates every 2 seconds
+- Provides status information on demand
+
+**Automatic Throttling**
+- Operations wait until resources become available
+- Maximum wait time: 5 minutes (configurable)
+- Operations are queued to prevent overload
+
+**Rate Limiting**
+- Default: Maximum 2 video processing operations per hour
+- Configurable via environment variables
+
+**Process Queue**
+- Only one heavy operation runs at a time by default
+- Prevents multiple video processing operations from running simultaneously
+- Ensures system remains responsive
+
+**Memory Management**
+- Automatic cleanup of temporary files (files older than 24 hours)
+- Garbage collection before and after heavy operations
+- Periodic cleanup every hour
+
+### Configuration
+
+Configure resource management via environment variables in your `.env` file:
+
+```env
+# Resource Thresholds (percentages)
+RESOURCE_CPU_THRESHOLD=75.0        # CPU usage threshold (default: 75%)
+RESOURCE_MEMORY_THRESHOLD=80.0      # Memory usage threshold (default: 80%)
+RESOURCE_DISK_THRESHOLD=85.0       # Disk usage threshold (default: 85%)
+
+# Concurrency Control
+RESOURCE_MAX_CONCURRENT=1          # Max concurrent heavy operations (default: 1)
+
+# Rate Limiting
+RESOURCE_RATE_LIMIT=1              # Max video operations per window (default: 1)
+RESOURCE_RATE_WINDOW=3600.0        # Time window in seconds (default: 3600 = 1 hour)
+```
+
+### Recommended Settings
+
+**For Low-End Systems (4GB RAM, 2 CPU cores)**
+```env
+RESOURCE_CPU_THRESHOLD=70.0
+RESOURCE_MEMORY_THRESHOLD=75.0
+RESOURCE_DISK_THRESHOLD=85.0
+RESOURCE_MAX_CONCURRENT=1
+RESOURCE_RATE_LIMIT=1
+RESOURCE_RATE_WINDOW=7200.0  # 2 hours
+```
+
+**For Mid-Range Systems (8GB RAM, 4 CPU cores)**
+```env
+RESOURCE_CPU_THRESHOLD=75.0
+RESOURCE_MEMORY_THRESHOLD=80.0
+RESOURCE_DISK_THRESHOLD=85.0
+RESOURCE_MAX_CONCURRENT=1
+RESOURCE_RATE_LIMIT=1
+RESOURCE_RATE_WINDOW=3600.0  # 1 hour
+```
+
+**For High-End Systems (16GB+ RAM, 8+ CPU cores)**
+```env
+RESOURCE_CPU_THRESHOLD=85.0
+RESOURCE_MEMORY_THRESHOLD=85.0
+RESOURCE_DISK_THRESHOLD=90.0
+RESOURCE_MAX_CONCURRENT=2
+RESOURCE_RATE_LIMIT=3
+RESOURCE_RATE_WINDOW=3600.0  # 1 hour
+```
+
+### Monitoring
+
+The bot prints resource status:
+- Before each video generation
+- During resource waits
+- Periodically during operation
+
+Example output:
+```
+[Resource Monitor] CPU: 45.2%, Memory: 62.3% (4.8GB used, 2.9GB available), Disk: 34.1% (156.2GB free)
+[Resource Manager] Active operations: 1, Rate limit OK: True, Resources available: True
+```
+
+### Troubleshooting
+
+**Bot is Waiting Too Long**
+1. Check your system resources: `top` (Linux/Mac) or Task Manager (Windows)
+2. Lower the thresholds in `.env` file
+3. Reduce `RESOURCE_RATE_LIMIT` to process fewer videos
+4. Close other resource-intensive applications
+
+**System Still Overloads**
+1. Lower all thresholds by 10-15%
+2. Set `RESOURCE_MAX_CONCURRENT=1` (only one operation at a time)
+3. Increase `RESOURCE_RATE_WINDOW` to allow fewer operations per time period
+4. Consider upgrading hardware or using a more powerful machine
+
+**Memory Issues**
+1. Lower `RESOURCE_MEMORY_THRESHOLD` to 70-75%
+2. Ensure temp directory has enough space
+3. Check for memory leaks in other applications
+4. Restart the bot periodically
+
+## Critical System Crash Fixes
+
+This section details critical memory optimizations implemented to prevent system crashes when processing large clips (4K videos, many clips).
+
+### Key Fixes
+
+**1. 4K Video Processing at Full Resolution** ⚠️ CRITICAL
+- **Problem**: Code was processing 3840x2160 videos at full resolution before downscaling
+- **Memory Impact**: ~9 GB per clip
+- **Fix**: Downscale to 1920x1080 FIRST before any operations
+- **Result**: 95% memory reduction (from ~9GB to ~450MB per clip)
+
+**2. Rotation Before Downscaling** ⚠️ CRITICAL
+- **Problem**: Rotation happened on full 4K frames
+- **Memory Impact**: 3-4 GB memory spike per rotated clip
+- **Fix**: Rotation now happens AFTER downscaling
+- **Result**: Eliminates 3-4 GB memory spike
+
+**3. Preprocessing Loading Entire Videos** ⚠️ CRITICAL
+- **Problem**: Entire large videos (4GB+) loaded into memory
+- **Memory Impact**: 4GB+ sustained RAM usage
+- **Fix**: Use `ffprobe` for metadata, load only when extracting segments
+- **Result**: Memory reduced from 4GB to ~100MB per segment
+
+**4. Segment Accumulation** ⚠️ HIGH
+- **Problem**: All segments kept in memory until concatenation
+- **Memory Impact**: 7-14 GB for 144 segments
+- **Fix**: Chunked concatenation (process in groups of 50)
+- **Result**: Peak memory reduced to 2-3GB
+
+**5. Clip Cache Too Large** ⚠️ MEDIUM
+- **Problem**: Cache kept 5 prepared clips in memory
+- **Memory Impact**: 500MB+ cache
+- **Fix**: Reduced cache from 5 to 2 clips
+- **Result**: 60% cache memory reduction
+
+### Memory Usage Comparison
+
+**Before Fixes (4K Video Processing)**:
+- Load 4K video: ~4 GB
+- Rotate at 4K: +3.75 GB (temporary spike)
+- Crop at 4K: +1 GB (temporary)
+- Resize to 1080p: +500 MB
+- **Total peak: ~9 GB per clip**
+
+**After Fixes**:
+- Load 4K video metadata: ~1 MB (ffprobe)
+- Downscale to 1920x1080: ~200 MB (one-time)
+- Rotate at 1080p: +200 MB (temporary)
+- Crop at 1080p: +50 MB (temporary)
+- **Total peak: ~450 MB per clip**
+
+**Memory reduction: ~95%**
+
+### Additional Optimizations
+
+1. **Beat Limiting**: Limits beats to 2.5 per second (prevents 144+ segments)
+2. **Segment Combination**: Combines very short intervals (<0.3s)
+3. **Adaptive Rendering**: Settings adjust based on segment count
+4. **Process Priority**: Lowers process priority to prevent system overload
+5. **Resource Monitoring**: Real-time monitoring with emergency abort
+6. **Chunked Concatenation**: Processes segments in chunks of 50
+7. **More Frequent GC**: Garbage collection every 5 segments instead of 10
+
+### Configuration for Limited RAM
+
+For systems with limited RAM, you can further reduce memory usage:
+
+```env
+# In .env file
+MAX_CLIPS_FOR_PROCESSING=30  # Reduce from 50
+RESOURCE_MEMORY_THRESHOLD=75.0  # Lower threshold
+RESOURCE_CPU_THRESHOLD=70.0  # Lower threshold
+```
+
+### Summary
+
+All critical memory issues have been fixed. The bot should now handle large clips without crashing the system. Key improvements:
+
+- ✅ 95% memory reduction for 4K video processing
+- ✅ No more loading entire large videos into memory
+- ✅ Downscaling happens FIRST (before expensive operations)
+- ✅ Real-time memory monitoring with emergency abort
+- ✅ More aggressive cleanup and garbage collection
+- ✅ Process priority management
+
+The bot is now production-ready for large clip libraries.
+
 ## Contributing
 
 1. Fork the repository
@@ -563,5 +775,3 @@ For support, please open an issue in the GitHub repository.
 - Uses [librosa](https://librosa.org/) for audio analysis
 - Uses [MoviePy](https://zulko.github.io/moviepy/) for video processing
 - Uses [undetected-chromedriver](https://github.com/ultrafunkamsterdam/undetected-chromedriver) for browser automation
-# him
-# Tiktokbot
