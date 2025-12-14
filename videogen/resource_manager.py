@@ -221,7 +221,7 @@ class ProcessQueue:
         # Wait for slot to become available
         while True:
             with self.lock:
-                if self.active_count is not None and self.active_count < self.max_concurrent:
+                if self.active_count < self.max_concurrent:
                     self.active_count += 1
                     break
             
@@ -391,10 +391,10 @@ class ResourceManager:
         
         # Initialize components
         self.monitor = ResourceMonitor(check_interval=2.0)
-        self.process_queue = ProcessQueue(max_concurrent=max_concurrent_operations)
+        self.process_queue = ProcessQueue(max_concurrent=self.max_concurrent_operations)
         self.video_rate_limiter = RateLimiter(
-            max_operations=video_processing_rate_limit,
-            time_window=video_processing_window
+            max_operations=self.video_processing_rate_limit,
+            time_window=self.video_processing_window
         )
         self.memory_manager = MemoryManager()
         
