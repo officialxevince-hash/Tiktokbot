@@ -1010,34 +1010,99 @@ def create_beat_synced_video(
         print(colored(f"[+] Video duration: {final_video.duration:.2f}s, Segments: {len(video_segments)}", "cyan"))
         print(colored(f"[+] Temporary files will be saved in: {os.path.abspath(temp_dir)}", "cyan"))
         
-        # Check resources before rendering
+        # AGGRESSIVE resource checks to prevent system crashes
+        try:
+            import psutil
+            import os as os_module
+            
+            # Lower process priority to prevent system overload (Unix/macOS)
+            try:
+                if hasattr(os_module, 'nice'):
+                    # Increase niceness (lower priority) - only works on Unix
+                    current_nice = os_module.nice(0)
+                    os_module.nice(5)  # Lower priority (higher niceness)
+                    print(colored(f"[+] Lowered process priority to prevent system overload", "green"))
+            except (AttributeError, OSError):
+                pass  # Not supported on this system
+            
+            # Check available memory - abort if less than 2GB free
+            memory = psutil.virtual_memory()
+            available_gb = memory.available / (1024 ** 3)
+            memory_percent = memory.percent
+            print(colored(f"[+] System resources: {available_gb:.1f}GB RAM available ({memory_percent:.1f}% used)", "cyan"))
+            
+            if available_gb < 2.0:
+                raise RuntimeError(f"Insufficient memory for rendering: {available_gb:.1f}GB available (need at least 2GB)")
+            
+            if memory_percent > 85:
+                print(colored(f"[!] Warning: Memory usage is {memory_percent:.1f}%, waiting...", "yellow"))
+                time.sleep(15)  # Wait for memory to free up
+                memory = psutil.virtual_memory()
+                if memory.percent > 85:
+                    raise RuntimeError(f"Memory too high: {memory.percent:.1f}% (system may crash)")
+            
+            # Check disk space - abort if less than 5GB free
+            disk = psutil.disk_usage('/')
+            free_gb = disk.free / (1024 ** 3)
+            disk_percent = disk.percent
+            print(colored(f"[+] Disk space: {free_gb:.1f}GB free ({disk_percent:.1f}% used)", "cyan"))
+            
+            if free_gb < 5.0:
+                raise RuntimeError(f"Insufficient disk space for rendering: {free_gb:.1f}GB free (need at least 5GB)")
+            
+            # Check CPU - abort if already very high
+            cpu_percent = psutil.cpu_percent(interval=1.0)
+            print(colored(f"[+] CPU usage: {cpu_percent:.1f}%", "cyan"))
+            
+            if cpu_percent > 90:
+                print(colored(f"[!] Warning: CPU usage is {cpu_percent:.1f}%, waiting...", "yellow"))
+                time.sleep(15)  # Wait for CPU to cool down
+                cpu_percent = psutil.cpu_percent(interval=1.0)
+                if cpu_percent > 90:
+                    raise RuntimeError(f"CPU usage too high: {cpu_percent:.1f}% (system may crash)")
+        except ImportError:
+            print(colored("[!] Warning: psutil not available, skipping resource checks", "yellow"))
+        except Exception as e:
+            raise RuntimeError(f"Resource check failed: {e}")
+        
+        # Check resources via resource manager
         try:
             from videogen.resource_manager import get_resource_manager
             resource_manager = get_resource_manager()
             if resource_manager:
-                if not resource_manager.check_resources():
-                    print(colored("[!] Resources high before rendering, waiting...", "yellow"))
-                    if not resource_manager.wait_for_resources(max_wait=120.0):
-                        raise RuntimeError("Resources unavailable for rendering")
+                # Use more aggressive thresholds for rendering
+                stats = resource_manager.monitor.get_stats()
+                if stats['memory_percent'] > 80:
+                    print(colored(f"[!] Memory usage high ({stats['memory_percent']:.1f}%), waiting...", "yellow"))
+                    if not resource_manager.wait_for_resources(max_wait=180.0):
+                        raise RuntimeError(f"Memory too high: {stats['memory_percent']:.1f}% (system may crash)")
+                
+                if stats['cpu_percent'] > 85:
+                    print(colored(f"[!] CPU usage high ({stats['cpu_percent']:.1f}%), waiting...", "yellow"))
+                    time.sleep(15)  # Wait for CPU to cool down
+                
                 resource_manager.memory_manager.force_garbage_collection()
         except:
             pass  # Resource manager not available, continue anyway
         
-        # Use memory-efficient settings for large videos
-        # Lower bitrate and faster preset reduce memory usage
+        # Use ULTRA-CONSERVATIVE settings to prevent system crashes
+        # Always use fast/ultrafast preset and lower bitrate to reduce resource usage
         video_duration = final_video.duration
-        is_large_video = video_duration > 30 or len(video_segments) > 50
+        is_large_video = video_duration > 20 or len(video_segments) > 30  # Lowered thresholds
         
-        if is_large_video:
-            print(colored(f"[!] Large video detected ({video_duration:.1f}s, {len(video_segments)} segments)", "yellow"))
-            print(colored("[!] Using memory-efficient rendering settings", "yellow"))
-            render_preset = 'fast'  # Faster preset uses less memory
-            render_bitrate = '6000k'  # Lower bitrate reduces memory
-            render_threads = min(threads, 2)  # Limit threads to prevent overload
-        else:
-            render_preset = 'medium'
-            render_bitrate = '8000k'
-            render_threads = threads
+        # Default to safest settings to prevent crashes
+        render_preset = 'ultrafast'  # Always use ultrafast to prevent crashes
+        render_bitrate = '4000k'  # Lower bitrate to reduce CPU/memory
+        render_threads = 1  # Single thread to prevent overload
+        
+        if not is_large_video:
+            # Only for very small videos, use slightly better settings
+            render_preset = 'fast'
+            render_bitrate = '5000k'
+            render_threads = min(threads, 1)  # Still limit to 1 thread
+        
+        print(colored(f"[!] Using ULTRA-SAFE rendering settings to prevent system crashes", "yellow"))
+        print(colored(f"[!] Preset: {render_preset}, Bitrate: {render_bitrate}, Threads: {render_threads}", "yellow"))
         
         # Render with progress monitoring, timeout, and error handling
         max_retries = 2
@@ -1057,10 +1122,40 @@ def create_beat_synced_video(
             freeze_detected = threading.Event()
             
             def monitor_progress():
-                """Monitor rendering progress by checking file size growth and process activity."""
+                """Monitor rendering progress and system resources to prevent crashes."""
                 nonlocal last_size, no_progress_count
                 while progress_monitor_active.is_set() and not freeze_detected.is_set():
                     time.sleep(check_interval)
+                    
+                    # CRITICAL: Monitor system resources during rendering
+                    try:
+                        import psutil
+                        memory = psutil.virtual_memory()
+                        cpu_percent = psutil.cpu_percent(interval=0.5)
+                        
+                        # Emergency abort if resources are critically high (prevent system crash)
+                        if memory.percent > 92:
+                            print(colored(f"[-] CRITICAL: Memory at {memory.percent:.1f}% - ABORTING to prevent crash", "red"))
+                            freeze_detected.set()
+                            raise RuntimeError(f"Memory critically high: {memory.percent:.1f}% - aborting to prevent system crash")
+                        
+                        if memory.available / (1024 ** 3) < 1.0:  # Less than 1GB free
+                            print(colored(f"[-] CRITICAL: Less than 1GB RAM free - ABORTING", "red"))
+                            freeze_detected.set()
+                            raise RuntimeError("Less than 1GB RAM available - aborting to prevent system crash")
+                        
+                        if cpu_percent > 95:
+                            print(colored(f"[-] CRITICAL: CPU at {cpu_percent:.1f}% - system may crash", "red"))
+                            # Abort if CPU is critically high for too long
+                            if cpu_percent > 98:
+                                freeze_detected.set()
+                                raise RuntimeError(f"CPU critically high: {cpu_percent:.1f}% - aborting to prevent system crash")
+                    except ImportError:
+                        pass
+                    except RuntimeError:
+                        raise  # Re-raise abort signals
+                    except:
+                        pass  # Ignore other errors in monitoring
                     
                     # Check if output file exists and is growing
                     if os.path.exists(output_path):
@@ -1072,7 +1167,7 @@ def create_beat_synced_video(
                                 no_progress_count = 0
                                 size_mb = current_size / (1024 ** 2)
                                 elapsed = time.time() - render_start_time
-                                progress_pct = min(100, (current_size / max(1, video_duration * 8000000)) * 100)  # Rough estimate
+                                progress_pct = min(100, (current_size / max(1, video_duration * 4000000)) * 100)  # Adjusted for lower bitrate
                                 print(colored(f"[!] Rendering: {size_mb:.1f} MB (~{progress_pct:.0f}%) - {elapsed:.0f}s elapsed", "cyan"))
                             else:
                                 # No progress
@@ -1181,16 +1276,24 @@ def create_beat_synced_video(
                         pass
                 
                 if attempt < max_retries - 1:
-                    # Try with even more conservative settings and shorter timeout
-                    render_preset = 'ultrafast'
-                    render_bitrate = '4000k'
-                    render_threads = 1
-                    rendering_timeout = max(180, int(video_duration * 8))  # Shorter timeout
+                    # Already using safest settings, but reduce timeout further
+                    rendering_timeout = max(120, int(video_duration * 6))  # Even shorter timeout
                     gc.collect()
-                    print(colored("[!] Retrying with faster settings and shorter timeout...", "yellow"))
-                    time.sleep(3)  # Wait before retry to let system recover
+                    
+                    # Check resources again before retry
+                    try:
+                        import psutil
+                        memory = psutil.virtual_memory()
+                        if memory.percent > 85:
+                            print(colored(f"[!] Memory still high ({memory.percent:.1f}%), waiting longer...", "yellow"))
+                            time.sleep(10)
+                    except:
+                        pass
+                    
+                    print(colored("[!] Retrying with shorter timeout...", "yellow"))
+                    time.sleep(5)  # Longer wait to let system recover
                 else:
-                    raise RuntimeError(f"Rendering timed out after {max_retries} attempts. Video may be too complex. Try reducing duration or effects.")
+                    raise RuntimeError(f"Rendering timed out after {max_retries} attempts. System may be overloaded. Try reducing video duration, number of clips, or effects.")
             
             except MemoryError as e:
                 print(colored(f"[-] Memory error during rendering (attempt {attempt + 1}/{max_retries}): {e}", "red"))
