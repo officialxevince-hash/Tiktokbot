@@ -14,6 +14,7 @@ import uuid
 import subprocess
 import tempfile
 import gc
+import time
 from typing import List, Optional, Tuple
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips, VideoClip
 from moviepy.video.fx.all import crop, resize, rotate
@@ -793,119 +794,159 @@ def create_beat_synced_video(
             cache_access_order.clear()
             gc.collect()  # Force garbage collection
         
-        try:
-            clips_loaded_count = 0
-            clips_failed_count = 0
+        clips_loaded_count = 0
+        clips_failed_count = 0
+        
+        for i, (start_time, end_time) in enumerate(intervals):
+            if start_time >= duration:
+                break
             
-            for i, (start_time, end_time) in enumerate(intervals):
-                if start_time >= duration:
-                    break
-                
-                segment_duration = end_time - start_time
-                
-                # Select a clip path (cycle through available clips)
-                selected_clip_path = clips[clip_index % len(clips)]
-                clip_index += 1
-                
-                # Load clip on-demand
-                selected_clip = get_prepared_clip(selected_clip_path)
-                if selected_clip is None:
-                    # Skip this segment if clip couldn't be loaded
-                    clips_failed_count += 1
-                    if clips_failed_count <= 3:  # Only log first few failures to avoid spam
-                        logger.warning(colored(f"[-] Skipping segment {i+1}: Could not load clip {os.path.basename(selected_clip_path)}", "yellow"))
-                    continue
-                
-                clips_loaded_count += 1
-                
-                # Get a random portion of the clip
-                if selected_clip.duration > segment_duration:
-                    clip_start = random.uniform(0, selected_clip.duration - segment_duration)
-                    segment = selected_clip.subclip(clip_start, clip_start + segment_duration)
-                else:
-                    # Clip is shorter than needed, use it fully
-                    segment = selected_clip.subclip(0, min(selected_clip.duration, segment_duration))
-                
-                # Determine if we're in hook phase (first 3 seconds)
-                is_hook_phase = current_video_time < HOOK_DURATION
-                is_finish_phase = current_video_time >= duration * 0.9
-                
-                # Adjust effect intensity based on phase
-                if is_hook_phase:
-                    # Hook phase: Maximum intensity, prefer flash and zoom
-                    phase_intensity = min(1.0, effect_intensity * 1.5)
-                    effect_choices = ['flash', 'zoom', 'prism', 'zoom', 'flash']  # Weighted towards flash/zoom
-                elif is_finish_phase:
-                    # Finish phase: High intensity for strong ending
-                    phase_intensity = min(1.0, effect_intensity * 1.2)
-                    effect_choices = ['zoom', 'flash', 'prism', 'rgb', 'jump_cut', 'none']
-                else:
-                    # Middle phase: Normal intensity
-                    phase_intensity = effect_intensity
-                    effect_choices = ['zoom', 'flash', 'rgb', 'prism', 'jump_cut', 'fast_cut', 'none']
-                
-                # Apply effects based on beat position and phase
-                effect_type = random.choice(effect_choices)
-                
-                has_effect = False
-                if effect_type == 'zoom' and random.random() < phase_intensity:
-                    zoom_factor = 1.3 if is_hook_phase else (1.2 + random.uniform(0, 0.3))
-                    segment = apply_zoom_effect(segment, zoom_factor=zoom_factor)
-                    has_effect = True
-                elif effect_type == 'flash' and random.random() < phase_intensity:
-                    flash_duration = 0.08 if is_hook_phase else 0.05  # Longer flash in hook
-                    segment = apply_flash_effect(segment, flash_duration=flash_duration)
-                    has_effect = True
-                elif effect_type == 'rgb' and random.random() < phase_intensity:
-                    segment = apply_rgb_shift(segment, shift_amount=random.randint(3, 10))
-                    has_effect = True
-                elif effect_type == 'prism' and random.random() < phase_intensity:
-                    prism_intensity = 0.5 if is_hook_phase else (0.3 + random.uniform(0, 0.4))
-                    segment = apply_prism_effect(segment, intensity=prism_intensity)
-                    has_effect = True
-                elif effect_type == 'jump_cut' and random.random() < phase_intensity * 0.5:
-                    segment = apply_jump_cut(segment, jump_duration=0.1)
-                    has_effect = True
-                elif effect_type == 'fast_cut' and random.random() < phase_intensity * 0.3:
-                    segment = apply_fast_cut(segment, cut_duration=0.05)
-                    has_effect = True
-                
-                # Track interesting moments (prefer flash and zoom effects for thumbnails)
-                if has_effect and (effect_type == 'flash' or effect_type == 'zoom' or effect_type == 'prism'):
-                    # Store the time when this effect segment starts (relative to final video)
-                    segment_start_in_video = current_video_time
-                    # Add time at 10% into the effect segment for best visual
-                    interesting_times.append(segment_start_in_video + segment_duration * 0.1)
-                
-                # Ensure segment matches exact duration
-                if segment.duration != segment_duration:
-                    segment = segment.subclip(0, min(segment.duration, segment_duration))
-                
-                video_segments.append(segment)
-                current_video_time += segment_duration
-                
-                # Periodic cleanup to prevent memory buildup
-                if i > 0 and i % 10 == 0:  # Every 10 segments
-                    gc.collect()  # Force garbage collection
-                    if len(video_segments) > 50:  # If we have many segments, warn
-                        print(colored(f"[!] Memory optimization: {len(video_segments)} segments in memory", "yellow"))
+            segment_duration = end_time - start_time
             
-            if not video_segments:
-                error_msg = (
-                    f"No valid video segments could be created. "
-                    f"Clips loaded: {clips_loaded_count}, Clips failed: {clips_failed_count}, "
-                    f"Total intervals: {len(intervals)}, Total clips available: {len(clips)}"
-                )
-                logger.error(colored(f"[-] {error_msg}", "red"))
-                raise ValueError(error_msg)
+            # Select a clip path (cycle through available clips)
+            selected_clip_path = clips[clip_index % len(clips)]
+            clip_index += 1
             
-            print(colored(f"[+] Successfully created {len(video_segments)} video segments from {clips_loaded_count} clips", "green"))
+            # Load clip on-demand
+            selected_clip = get_prepared_clip(selected_clip_path)
+            if selected_clip is None:
+                # Skip this segment if clip couldn't be loaded
+                clips_failed_count += 1
+                if clips_failed_count <= 3:  # Only log first few failures to avoid spam
+                    logger.warning(colored(f"[-] Skipping segment {i+1}: Could not load clip {os.path.basename(selected_clip_path)}", "yellow"))
+                continue
             
-            # Clean up clip cache before concatenation (frees memory)
-            cleanup_clip_cache()
+            clips_loaded_count += 1
             
-            # Concatenate all segments
-            print(colored(f"[+] Combining {len(video_segments)} video segments", "cyan"))
+            # Get a random portion of the clip
+            if selected_clip.duration > segment_duration:
+                clip_start = random.uniform(0, selected_clip.duration - segment_duration)
+                segment = selected_clip.subclip(clip_start, clip_start + segment_duration)
+            else:
+                # Clip is shorter than needed, use it fully
+                segment = selected_clip.subclip(0, min(selected_clip.duration, segment_duration))
+            
+            # Determine if we're in hook phase (first 3 seconds)
+            is_hook_phase = current_video_time < HOOK_DURATION
+            is_finish_phase = current_video_time >= duration * 0.9
+            
+            # Adjust effect intensity based on phase
+            if is_hook_phase:
+                # Hook phase: Maximum intensity, prefer flash and zoom
+                phase_intensity = min(1.0, effect_intensity * 1.5)
+                effect_choices = ['flash', 'zoom', 'prism', 'zoom', 'flash']  # Weighted towards flash/zoom
+            elif is_finish_phase:
+                # Finish phase: High intensity for strong ending
+                phase_intensity = min(1.0, effect_intensity * 1.2)
+                effect_choices = ['zoom', 'flash', 'prism', 'rgb', 'jump_cut', 'none']
+            else:
+                # Middle phase: Normal intensity
+                phase_intensity = effect_intensity
+                effect_choices = ['zoom', 'flash', 'rgb', 'prism', 'jump_cut', 'fast_cut', 'none']
+            
+            # Apply effects based on beat position and phase
+            effect_type = random.choice(effect_choices)
+            
+            has_effect = False
+            if effect_type == 'zoom' and random.random() < phase_intensity:
+                zoom_factor = 1.3 if is_hook_phase else (1.2 + random.uniform(0, 0.3))
+                segment = apply_zoom_effect(segment, zoom_factor=zoom_factor)
+                has_effect = True
+            elif effect_type == 'flash' and random.random() < phase_intensity:
+                flash_duration = 0.08 if is_hook_phase else 0.05  # Longer flash in hook
+                segment = apply_flash_effect(segment, flash_duration=flash_duration)
+                has_effect = True
+            elif effect_type == 'rgb' and random.random() < phase_intensity:
+                segment = apply_rgb_shift(segment, shift_amount=random.randint(3, 10))
+                has_effect = True
+            elif effect_type == 'prism' and random.random() < phase_intensity:
+                prism_intensity = 0.5 if is_hook_phase else (0.3 + random.uniform(0, 0.4))
+                segment = apply_prism_effect(segment, intensity=prism_intensity)
+                has_effect = True
+            elif effect_type == 'jump_cut' and random.random() < phase_intensity * 0.5:
+                segment = apply_jump_cut(segment, jump_duration=0.1)
+                has_effect = True
+            elif effect_type == 'fast_cut' and random.random() < phase_intensity * 0.3:
+                segment = apply_fast_cut(segment, cut_duration=0.05)
+                has_effect = True
+            
+            # Track interesting moments (prefer flash and zoom effects for thumbnails)
+            if has_effect and (effect_type == 'flash' or effect_type == 'zoom' or effect_type == 'prism'):
+                # Store the time when this effect segment starts (relative to final video)
+                segment_start_in_video = current_video_time
+                # Add time at 10% into the effect segment for best visual
+                interesting_times.append(segment_start_in_video + segment_duration * 0.1)
+            
+            # Ensure segment matches exact duration
+            if segment.duration != segment_duration:
+                segment = segment.subclip(0, min(segment.duration, segment_duration))
+            
+            video_segments.append(segment)
+            current_video_time += segment_duration
+            
+            # Periodic cleanup to prevent memory buildup
+            if i > 0 and i % 10 == 0:  # Every 10 segments
+                gc.collect()  # Force garbage collection
+                if len(video_segments) > 50:  # If we have many segments, warn
+                    print(colored(f"[!] Memory optimization: {len(video_segments)} segments in memory", "yellow"))
+        
+        if not video_segments:
+            error_msg = (
+                f"No valid video segments could be created. "
+                f"Clips loaded: {clips_loaded_count}, Clips failed: {clips_failed_count}, "
+                f"Total intervals: {len(intervals)}, Total clips available: {len(clips)}"
+            )
+            logger.error(colored(f"[-] {error_msg}", "red"))
+            cleanup_clip_cache()  # Clean up before raising error
+            raise ValueError(error_msg)
+        
+        print(colored(f"[+] Successfully created {len(video_segments)} video segments from {clips_loaded_count} clips", "green"))
+        
+        # Clean up clip cache before concatenation (frees memory)
+        cleanup_clip_cache()
+            
+        # Concatenate all segments - use memory-efficient method for large videos
+        print(colored(f"[+] Combining {len(video_segments)} video segments", "cyan"))
+        
+        # For very large videos, concatenate in chunks to reduce memory
+        if len(video_segments) > 100:
+            print(colored(f"[!] Large number of segments ({len(video_segments)}), using chunked concatenation", "yellow"))
+            # Concatenate in chunks of 50 segments
+            chunk_size = 50
+            chunked_videos = []
+            
+            for chunk_start in range(0, len(video_segments), chunk_size):
+                chunk_end = min(chunk_start + chunk_size, len(video_segments))
+                chunk = video_segments[chunk_start:chunk_end]
+                
+                print(colored(f"[+] Concatenating chunk {chunk_start//chunk_size + 1} ({len(chunk)} segments)...", "cyan"))
+                chunk_video = concatenate_videoclips(chunk, method="compose")
+                chunk_video = chunk_video.set_fps(30)
+                chunked_videos.append(chunk_video)
+                
+                # Clean up chunk segments immediately
+                for segment in chunk:
+                    try:
+                        segment.close()
+                    except:
+                        pass
+                
+                gc.collect()  # Force cleanup after each chunk
+            
+            # Concatenate the chunks
+            print(colored(f"[+] Combining {len(chunked_videos)} video chunks...", "cyan"))
+            final_video = concatenate_videoclips(chunked_videos, method="compose")
+            final_video = final_video.set_fps(30)
+            
+            # Clean up chunks
+            for chunk_video in chunked_videos:
+                try:
+                    chunk_video.close()
+                except:
+                    pass
+            chunked_videos.clear()
+        else:
+            # Normal concatenation for smaller videos
             final_video = concatenate_videoclips(video_segments, method="compose")
             final_video = final_video.set_fps(30)
             
@@ -915,11 +956,12 @@ def create_beat_synced_video(
                     segment.close()
                 except:
                     pass
-            video_segments.clear()
-            gc.collect()  # Force cleanup
-        finally:
-            # Ensure cleanup even on error
-            cleanup_clip_cache()
+        
+        video_segments.clear()
+        gc.collect()  # Force cleanup
+        
+        # Clean up clip cache after segment creation
+        cleanup_clip_cache()
         
         # Create and prepend interesting thumbnail
         print(colored(f"[+] Creating interesting thumbnail...", "cyan"))
@@ -961,24 +1003,107 @@ def create_beat_synced_video(
         temp_audio_filename = f"temp_audio_{uuid.uuid4().hex}.mp4"
         temp_audio_path = os.path.join(temp_dir, temp_audio_filename)
         
-        # Write video with audio
+        # Write video with audio - optimized for large videos and stability
         print(colored(f"[+] Rendering video to {output_path}", "cyan"))
+        print(colored(f"[+] Video duration: {final_video.duration:.2f}s, Segments: {len(video_segments)}", "cyan"))
         print(colored(f"[+] Temporary files will be saved in: {os.path.abspath(temp_dir)}", "cyan"))
-        final_video.write_videofile(
-            output_path,
-            threads=threads,
-            codec='libx264',
-            audio_codec='aac',
-            preset='medium',
-            bitrate='8000k',
-            fps=30,
-            audio_bitrate='192k',
-            audio_fps=44100,
-            temp_audiofile=temp_audio_path,
-            remove_temp=True
-        )
         
-        # Clean up
+        # Check resources before rendering
+        try:
+            from videogen.resource_manager import get_resource_manager
+            resource_manager = get_resource_manager()
+            if resource_manager:
+                if not resource_manager.check_resources():
+                    print(colored("[!] Resources high before rendering, waiting...", "yellow"))
+                    if not resource_manager.wait_for_resources(max_wait=120.0):
+                        raise RuntimeError("Resources unavailable for rendering")
+                resource_manager.memory_manager.force_garbage_collection()
+        except:
+            pass  # Resource manager not available, continue anyway
+        
+        # Use memory-efficient settings for large videos
+        # Lower bitrate and faster preset reduce memory usage
+        video_duration = final_video.duration
+        is_large_video = video_duration > 30 or len(video_segments) > 50
+        
+        if is_large_video:
+            print(colored(f"[!] Large video detected ({video_duration:.1f}s, {len(video_segments)} segments)", "yellow"))
+            print(colored("[!] Using memory-efficient rendering settings", "yellow"))
+            render_preset = 'fast'  # Faster preset uses less memory
+            render_bitrate = '6000k'  # Lower bitrate reduces memory
+            render_threads = min(threads, 2)  # Limit threads to prevent overload
+        else:
+            render_preset = 'medium'
+            render_bitrate = '8000k'
+            render_threads = threads
+        
+        # Render with progress monitoring and error handling
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                # Force garbage collection before rendering
+                gc.collect()
+                
+                # Render with optimized settings
+                final_video.write_videofile(
+                    output_path,
+                    threads=render_threads,
+                    codec='libx264',
+                    audio_codec='aac',
+                    preset=render_preset,
+                    bitrate=render_bitrate,
+                    fps=30,
+                    audio_bitrate='192k',
+                    audio_fps=44100,
+                    temp_audiofile=temp_audio_path,
+                    remove_temp=True,
+                    logger=None,  # Suppress verbose output to reduce memory
+                    write_logfile=False  # Don't write log file
+                )
+                
+                # Verify output file was created and is valid
+                if not os.path.exists(output_path):
+                    raise RuntimeError("Output file was not created")
+                
+                output_size = os.path.getsize(output_path)
+                if output_size < 1024:  # Less than 1KB is likely corrupted
+                    raise RuntimeError(f"Output file too small ({output_size} bytes), likely corrupted")
+                
+                print(colored(f"[+] Rendering completed successfully ({output_size / (1024**2):.1f} MB)", "green"))
+                break  # Success, exit retry loop
+                
+            except MemoryError as e:
+                print(colored(f"[-] Memory error during rendering (attempt {attempt + 1}/{max_retries}): {e}", "red"))
+                if attempt < max_retries - 1:
+                    # Try with even more conservative settings
+                    render_preset = 'ultrafast'
+                    render_bitrate = '4000k'
+                    render_threads = 1
+                    gc.collect()
+                    print(colored("[!] Retrying with ultra-low memory settings...", "yellow"))
+                    time.sleep(2)  # Wait before retry
+                else:
+                    raise RuntimeError("Rendering failed due to memory constraints. Try reducing video duration or number of clips.")
+            
+            except Exception as e:
+                error_msg = str(e)
+                if "crash" in error_msg.lower() or "killed" in error_msg.lower() or "signal" in error_msg.lower():
+                    print(colored(f"[-] Rendering crashed (attempt {attempt + 1}/{max_retries}): {e}", "red"))
+                    if attempt < max_retries - 1:
+                        # Try with more conservative settings
+                        render_preset = 'ultrafast'
+                        render_bitrate = '4000k'
+                        render_threads = 1
+                        gc.collect()
+                        print(colored("[!] Retrying with safer settings...", "yellow"))
+                        time.sleep(3)  # Wait before retry
+                    else:
+                        raise RuntimeError(f"Rendering crashed after {max_retries} attempts: {e}")
+                else:
+                    # Other errors, don't retry
+                    raise
+        
+        # Clean up immediately after rendering
         try:
             final_video.close()
         except:
@@ -991,7 +1116,24 @@ def create_beat_synced_video(
         # Force garbage collection after cleanup
         gc.collect()
         
-        print(colored(f"[+] Music video created successfully: {output_path}", "green"))
+        # Final resource cleanup
+        try:
+            from videogen.resource_manager import get_resource_manager
+            resource_manager = get_resource_manager()
+            if resource_manager:
+                resource_manager.memory_manager.force_garbage_collection()
+                resource_manager.memory_manager.cleanup_temp_files(temp_dir=temp_dir, max_age_hours=1.0)
+        except:
+            pass
+        
+        # Verify final output
+        if os.path.exists(output_path):
+            file_size = os.path.getsize(output_path)
+            file_size_mb = file_size / (1024 ** 2)
+            print(colored(f"[+] Music video created successfully: {output_path} ({file_size_mb:.1f} MB)", "green"))
+        else:
+            raise RuntimeError(f"Output file not found after rendering: {output_path}")
+        
         return output_path
     
     except Exception as e:
