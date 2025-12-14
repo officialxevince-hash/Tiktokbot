@@ -1,6 +1,6 @@
 import time, requests, json
 import uuid
-import requests, json, time, subprocess, os, sys
+import subprocess, os, sys
 from datetime import datetime
 from fake_useragent import FakeUserAgentError, UserAgent
 from requests_auth_aws_sigv4 import AWSSigV4
@@ -34,6 +34,7 @@ def login(login_name: str):
 	response = browser.driver.get(login_url)
 
 	session_cookies = []
+	cookie_name = None
 	while not session_cookies:
 		for cookie in browser.driver.get_cookies():
 			if cookie["name"] in ["sessionid", "tt-target-idc"]:
@@ -231,10 +232,10 @@ def upload_video(session_user, video, title, description, keywords, schedule_tim
 					"video_id": video_id
 				},
 				"privacy_setting_info": {
-					"visibility_type": 0,
-					"allow_duet": 1,
-					"allow_stitch": 1,
-					"allow_comment": 1
+					"visibility_type": visibility_type,
+					"allow_duet": allow_duet,
+					"allow_stitch": allow_stitch,
+					"allow_comment": allow_comment
 				}
 			}
 		],
@@ -612,11 +613,9 @@ if __name__ == "__main__":
 	output = proc.stdout.read().decode('utf-8')
 	json_output = json.loads(output)["data"]
 	print(json_output)
-	print(f""
-	      f"X-Bogus: {json_output['x-bogus']}\n"
+	print(f"X-Bogus: {json_output['x-bogus']}\n"
 	      f"Signature: {json_output['signature']}\n"
 	      f"Signed URL: {json_output['signed_url']}\n"
 	      f"X TT Params: {json_output['x-tt-params']}\n"
-		  f"User Agent: {json_output['navigator']['user_agent']}\n"
-	      f"")
+	      f"User Agent: {json_output['navigator']['user_agent']}\n")
 
