@@ -90,19 +90,49 @@ fi
 
 cd "$SIGNATURE_DIR"
 
-# Check if npm is available (needed for Playwright post-install scripts)
+# Try to find npm in common locations
+NPM_CMD=""
 if command -v npm &> /dev/null; then
+    NPM_CMD="npm"
+elif [ -f "/opt/homebrew/bin/npm" ]; then
+    NPM_CMD="/opt/homebrew/bin/npm"
+elif [ -f "/usr/local/bin/npm" ]; then
+    NPM_CMD="/usr/local/bin/npm"
+fi
+
+# Install dependencies - prefer npm for Playwright compatibility
+if [ -n "$NPM_CMD" ]; then
     echo -e "${GREEN}[+] Installing dependencies with npm (required for Playwright)...${NC}"
-    npm install
+    $NPM_CMD install
 else
-    echo -e "${YELLOW}[!] npm not found, trying bun...${NC}"
+    echo -e "${YELLOW}[!] npm not found in PATH, trying bun...${NC}"
     echo -e "${YELLOW}[!] Note: Playwright may not install correctly with bun${NC}"
     bun install
-    # Verify Playwright installation
+    
+    # Verify Playwright installation - if incomplete, try to fix it
     if [ ! -d "node_modules/playwright-core/lib" ]; then
-        echo -e "${RED}[-] Error: Playwright installation incomplete with bun${NC}"
-        echo -e "${YELLOW}[!] Please install npm and run: npm install${NC}"
-        exit 1
+        echo -e "${YELLOW}[!] Playwright installation incomplete with bun, attempting to fix...${NC}"
+        
+        # Try to find npm again (might be in PATH now after bun install)
+        if command -v npm &> /dev/null 2>&1; then
+            echo -e "${GREEN}[+] Found npm, reinstalling Playwright...${NC}"
+            npm install playwright-chromium --save
+        elif [ -f "/opt/homebrew/bin/npm" ]; then
+            echo -e "${GREEN}[+] Found npm at /opt/homebrew/bin/npm, reinstalling Playwright...${NC}"
+            /opt/homebrew/bin/npm install playwright-chromium --save
+        else
+            echo -e "${RED}[-] Error: Playwright installation incomplete and npm not available${NC}"
+            echo -e "${YELLOW}[!] Please install npm: brew install node (includes npm)${NC}"
+            echo -e "${YELLOW}[!] Or manually run: cd $SIGNATURE_DIR && npm install${NC}"
+            exit 1
+        fi
+        
+        # Verify again
+        if [ ! -d "node_modules/playwright-core/lib" ]; then
+            echo -e "${RED}[-] Error: Playwright installation still incomplete${NC}"
+            echo -e "${YELLOW}[!] Please manually run: cd $SIGNATURE_DIR && npm install${NC}"
+            exit 1
+        fi
     fi
 fi
 
