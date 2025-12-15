@@ -1062,21 +1062,6 @@ def create_beat_synced_video(
                             print(colored(f"[!] Warning: Memory usage is {memory.percent:.1f}%", "yellow"))
                     except:
                         pass
-                
-                # Check file descriptor usage (macOS/Linux)
-                try:
-                    import resource
-                    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-                    # Get current open file count (approximate)
-                    import subprocess
-                    # os is already imported at module level, don't re-import here
-                    proc = subprocess.Popen(['lsof', '-p', str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                    stdout, _ = proc.communicate()
-                    open_files = len([line for line in stdout.decode().split('\n') if line.strip()])
-                    if open_files > soft * 0.8:  # Warn if using more than 80% of limit
-                        print(colored(f"[!] Warning: {open_files} file descriptors open (limit: {soft})", "yellow"))
-                except:
-                    pass  # Skip if lsof not available or on Windows
         
         if not video_segments:
             error_msg = (
@@ -1095,6 +1080,72 @@ def create_beat_synced_video(
         
         # Clean up clip cache before concatenation (frees memory)
         cleanup_clip_cache()
+        
+        # CRITICAL: Try to increase file descriptor limit if possible
+        try:
+            import resource
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            # Try to increase soft limit up to hard limit (or 1024, whichever is lower)
+            new_soft = min(hard, 1024)
+            if new_soft > soft:
+                resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+                print(colored(f"[+] Increased file descriptor limit from {soft} to {new_soft}", "green"))
+        except:
+            pass  # Skip if not supported
+        
+        # CRITICAL: Write segments to temporary files to release file handles
+        # This prevents "Too many open files" errors during rendering
+        # Always write segments if we have many (>50) to prevent issues
+        should_write_segments = num_segments_created > 50
+        
+        if should_write_segments:
+            print(colored(f"[+] Writing {num_segments_created} segments to temporary files to release file handles", "cyan"))
+            # Write all segments to temporary files and reload them
+            # This ensures original video files are closed
+            # Write in batches to avoid opening too many files at once
+            batch_size = 20  # Write 20 segments at a time
+            temp_segment_paths = []
+            
+            for batch_start in range(0, num_segments_created, batch_size):
+                batch_end = min(batch_start + batch_size, num_segments_created)
+                batch_segments = video_segments[batch_start:batch_end]
+                
+                # Write batch to disk
+                for seg_idx, segment in enumerate(batch_segments):
+                    i = batch_start + seg_idx
+                    try:
+                        temp_seg_path = os.path.join(temp_dir, f"segment_{i}_{uuid.uuid4().hex}.mp4")
+                        # Write segment to temp file with fast settings
+                        segment.write_videofile(temp_seg_path, codec='libx264', preset='ultrafast', 
+                                               bitrate='2000k', audio=False, logger=None, threads=1)
+                        # Close original segment immediately to release file handle
+                        segment.close()
+                        # Store path for reloading
+                        temp_segment_paths.append(temp_seg_path)
+                    except Exception as e:
+                        # If writing fails, keep original segment (mark as None)
+                        temp_segment_paths.append(None)
+                        print(colored(f"[!] Warning: Failed to write segment {i} to disk: {e}", "yellow"))
+                
+                # Force cleanup after each batch
+                gc.collect()
+                
+                # Progress update
+                print(colored(f"[+] Written {batch_end}/{num_segments_created} segments to disk", "cyan"))
+            
+            # Reload segments from temporary files in batches
+            print(colored(f"[+] Reloading segments from temporary files...", "cyan"))
+            for i, temp_path in enumerate(temp_segment_paths):
+                if temp_path and os.path.exists(temp_path):
+                    try:
+                        video_segments[i] = VideoFileClip(temp_path)
+                    except Exception as e:
+                        print(colored(f"[!] Warning: Failed to reload segment {i} from {temp_path}: {e}", "yellow"))
+                # If temp_path is None, segment wasn't written, keep original (shouldn't happen)
+            
+            # Final cleanup
+            gc.collect()
+            print(colored(f"[+] Segments written to disk and reloaded - file handles released", "green"))
         
         # CRITICAL: Force aggressive garbage collection before concatenation
         gc.collect()
