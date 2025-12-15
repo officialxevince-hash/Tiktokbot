@@ -1105,6 +1105,7 @@ def create_beat_synced_video(
             # Write in batches to avoid opening too many files at once
             batch_size = 20  # Write 20 segments at a time
             temp_segment_paths = []
+            segments_to_keep_original = set()  # Track segments that failed to write
             
             for batch_start in range(0, num_segments_created, batch_size):
                 batch_end = min(batch_start + batch_size, num_segments_created)
@@ -1114,18 +1115,41 @@ def create_beat_synced_video(
                 for seg_idx, segment in enumerate(batch_segments):
                     i = batch_start + seg_idx
                     try:
+                        # Check if segment is valid before writing
+                        if segment is None:
+                            temp_segment_paths.append(None)
+                            segments_to_keep_original.add(i)
+                            continue
+                        
+                        # Validate segment before writing
+                        try:
+                            _ = segment.duration
+                            if hasattr(segment, 'reader') and segment.reader is None:
+                                raise ValueError("Segment has None reader")
+                        except Exception as e:
+                            print(colored(f"[!] Warning: Segment {i} is invalid before writing: {e}, keeping original", "yellow"))
+                            temp_segment_paths.append(None)
+                            segments_to_keep_original.add(i)
+                            continue
+                        
                         temp_seg_path = os.path.join(temp_dir, f"segment_{i}_{uuid.uuid4().hex}.mp4")
                         # Write segment to temp file with fast settings
                         segment.write_videofile(temp_seg_path, codec='libx264', preset='ultrafast', 
                                                bitrate='2000k', audio=False, logger=None, threads=1)
+                        
+                        # Verify file was created and has reasonable size
+                        if not os.path.exists(temp_seg_path) or os.path.getsize(temp_seg_path) < 1024:
+                            raise ValueError(f"Written file is missing or too small: {temp_seg_path}")
+                        
                         # Close original segment immediately to release file handle
                         segment.close()
                         # Store path for reloading
                         temp_segment_paths.append(temp_seg_path)
                     except Exception as e:
-                        # If writing fails, keep original segment (mark as None)
+                        # If writing fails, keep original segment (don't close it)
                         temp_segment_paths.append(None)
-                        print(colored(f"[!] Warning: Failed to write segment {i} to disk: {e}", "yellow"))
+                        segments_to_keep_original.add(i)
+                        print(colored(f"[!] Warning: Failed to write segment {i} to disk: {e}, keeping original", "yellow"))
                 
                 # Force cleanup after each batch
                 gc.collect()
@@ -1135,17 +1159,183 @@ def create_beat_synced_video(
             
             # Reload segments from temporary files in batches
             print(colored(f"[+] Reloading segments from temporary files...", "cyan"))
+            failed_reloads = []
             for i, temp_path in enumerate(temp_segment_paths):
                 if temp_path and os.path.exists(temp_path):
                     try:
-                        video_segments[i] = VideoFileClip(temp_path)
+                        new_clip = VideoFileClip(temp_path)
+                        # CRITICAL: Validate the reloaded clip before replacing
+                        # Check that reader is valid
+                        if hasattr(new_clip, 'reader') and new_clip.reader is None:
+                            print(colored(f"[!] Warning: Reloaded segment {i} has None reader, marking for removal", "yellow"))
+                            new_clip.close()
+                            failed_reloads.append(i)
+                            continue
+                        # Try to access duration to verify it's fully loaded
+                        _ = new_clip.duration
+                        # Replace original segment
+                        video_segments[i] = new_clip
                     except Exception as e:
                         print(colored(f"[!] Warning: Failed to reload segment {i} from {temp_path}: {e}", "yellow"))
-                # If temp_path is None, segment wasn't written, keep original (shouldn't happen)
+                        # If this segment was supposed to keep original, it's already in video_segments
+                        # Otherwise, original was closed, so mark for removal
+                        if i not in segments_to_keep_original:
+                            failed_reloads.append(i)
+                elif temp_path is None:
+                    # Segment wasn't written - check if we should keep original
+                    if i in segments_to_keep_original:
+                        # Original segment should still be valid (wasn't closed)
+                        # Verify it's still valid
+                        try:
+                            if video_segments[i] is None:
+                                failed_reloads.append(i)
+                                continue
+                            # Check reader
+                            if hasattr(video_segments[i], 'reader') and video_segments[i].reader is None:
+                                failed_reloads.append(i)
+                                continue
+                            # Try to access duration
+                            _ = video_segments[i].duration
+                        except Exception as e:
+                            # Can't verify, mark for removal to be safe
+                            print(colored(f"[!] Warning: Original segment {i} validation failed: {e}", "yellow"))
+                            failed_reloads.append(i)
+                    else:
+                        # This shouldn't happen - segment should have been written
+                        print(colored(f"[!] Warning: Segment {i} has None temp_path but wasn't marked to keep original", "yellow"))
+                        failed_reloads.append(i)
+                else:
+                    # temp_path exists but file doesn't - mark for removal
+                    print(colored(f"[!] Warning: Segment {i} temp file missing: {temp_path}", "yellow"))
+                    if i not in segments_to_keep_original:
+                        failed_reloads.append(i)
+            
+            # Remove failed segments (in reverse order to maintain indices)
+            if failed_reloads:
+                print(colored(f"[!] Removing {len(failed_reloads)} segments that failed to reload", "yellow"))
+                for i in sorted(failed_reloads, reverse=True):
+                    try:
+                        # Try to close if it's still a clip object
+                        if hasattr(video_segments[i], 'close'):
+                            video_segments[i].close()
+                    except:
+                        pass
+                    del video_segments[i]
+                
+                # Update segment count
+                num_segments_created = len(video_segments)
+                print(colored(f"[+] {num_segments_created} segments ready for concatenation", "green"))
             
             # Final cleanup
             gc.collect()
             print(colored(f"[+] Segments written to disk and reloaded - file handles released", "green"))
+            
+            # CRITICAL: Validate all segments before concatenation
+            # Remove any segments that are None or have invalid readers
+            valid_segments = []
+            invalid_count = 0
+            for i, seg in enumerate(video_segments):
+                try:
+                    # Check if segment is None
+                    if seg is None:
+                        invalid_count += 1
+                        print(colored(f"[!] Warning: Segment {i} is None, removing", "yellow"))
+                        continue
+                    
+                    # Check if it's a VideoFileClip with a None reader
+                    if hasattr(seg, 'reader') and seg.reader is None:
+                        invalid_count += 1
+                        print(colored(f"[!] Warning: Segment {i} has None reader, removing", "yellow"))
+                        try:
+                            if hasattr(seg, 'close'):
+                                seg.close()
+                        except:
+                            pass
+                        continue
+                    
+                    # Try to access duration to verify it's valid
+                    seg_duration = seg.duration
+                    if seg_duration <= 0:
+                        raise ValueError("Segment has invalid duration")
+                    
+                    # CRITICAL: For VideoFileClip, try to get a frame to verify reader is valid
+                    # This is the most reliable way to check if a segment is usable
+                    # MoviePy lazy-loads readers, so checking reader directly isn't enough
+                    if hasattr(seg, 'get_frame'):
+                        try:
+                            # Try to get first frame - this will initialize reader if needed and catch None reader errors
+                            test_frame = seg.get_frame(0)
+                            if test_frame is None:
+                                raise ValueError("Segment returned None frame")
+                        except AttributeError as e:
+                            # If error mentions 'NoneType' or 'get_frame', reader is likely None
+                            if 'NoneType' in str(e) or 'get_frame' in str(e):
+                                raise ValueError(f"Segment reader is invalid: {e}")
+                            raise
+                    
+                    valid_segments.append(seg)
+                except Exception as e:
+                    invalid_count += 1
+                    print(colored(f"[!] Warning: Segment {i} is invalid: {e}, removing", "yellow"))
+                    try:
+                        if hasattr(seg, 'close'):
+                            seg.close()
+                    except:
+                        pass
+            
+            if invalid_count > 0:
+                print(colored(f"[!] Removed {invalid_count} invalid segments before concatenation", "yellow"))
+                video_segments = valid_segments
+                num_segments_created = len(video_segments)
+                if num_segments_created == 0:
+                    raise ValueError("All segments were invalid after validation - cannot create video")
+                print(colored(f"[+] {num_segments_created} valid segments ready for concatenation", "green"))
+        else:
+            # Even if we didn't write segments to disk, validate them anyway
+            # This catches any segments that might have become invalid during processing
+            valid_segments = []
+            invalid_count = 0
+            for i, seg in enumerate(video_segments):
+                try:
+                    if seg is None:
+                        invalid_count += 1
+                        continue
+                    if hasattr(seg, 'reader') and seg.reader is None:
+                        invalid_count += 1
+                        continue
+                    
+                    # Check duration
+                    seg_duration = seg.duration
+                    if seg_duration <= 0:
+                        raise ValueError("Segment has invalid duration")
+                    
+                    # CRITICAL: Try to get a frame to verify reader is valid
+                    if hasattr(seg, 'get_frame'):
+                        try:
+                            test_frame = seg.get_frame(0)
+                            if test_frame is None:
+                                raise ValueError("Segment returned None frame")
+                        except AttributeError as e:
+                            if 'NoneType' in str(e) or 'get_frame' in str(e):
+                                raise ValueError(f"Segment reader is invalid: {e}")
+                            raise
+                    
+                    valid_segments.append(seg)
+                except Exception as e:
+                    invalid_count += 1
+                    print(colored(f"[!] Warning: Segment {i} is invalid: {e}, removing", "yellow"))
+                    try:
+                        if hasattr(seg, 'close'):
+                            seg.close()
+                    except:
+                        pass
+            
+            if invalid_count > 0:
+                print(colored(f"[!] Removed {invalid_count} invalid segments", "yellow"))
+                video_segments = valid_segments
+                num_segments_created = len(video_segments)
+                if num_segments_created == 0:
+                    raise ValueError("All segments were invalid - cannot create video")
         
         # CRITICAL: Force aggressive garbage collection before concatenation
         gc.collect()
@@ -1230,14 +1420,25 @@ def create_beat_synced_video(
         
         # Create and prepend interesting thumbnail
         print(colored(f"[+] Creating interesting thumbnail...", "cyan"))
-        thumbnail_clip = create_interesting_thumbnail(final_video, interesting_times=interesting_times, thumbnail_duration=0.2)
+        try:
+            thumbnail_clip = create_interesting_thumbnail(final_video, interesting_times=interesting_times, thumbnail_duration=0.2)
+        except Exception as e:
+            # If thumbnail creation fails (e.g., due to invalid segments), skip thumbnail
+            print(colored(f"[!] Warning: Failed to create thumbnail: {e}, skipping thumbnail", "yellow"))
+            # Don't prepend thumbnail - just use final_video as-is
+            thumbnail_clip = None
         # Prepend thumbnail to make it the first frame (TikTok uses first frame as thumbnail)
-        # Store reference to old final_video so we can close it after rendering (not before!)
-        # DO NOT close these clips yet - they're still referenced by the CompositeVideoClip
-        # The CompositeVideoClip created by concatenate_videoclips will reference these clips
-        # Closing them before rendering completes will cause 'NoneType' errors
-        old_final_video_before_thumbnail = final_video
-        final_video = concatenate_videoclips([thumbnail_clip, final_video], method="compose")
+        # Only prepend if thumbnail was successfully created
+        if thumbnail_clip is not None:
+            # Store reference to old final_video so we can close it after rendering (not before!)
+            # DO NOT close these clips yet - they're still referenced by the CompositeVideoClip
+            # The CompositeVideoClip created by concatenate_videoclips will reference these clips
+            # Closing them before rendering completes will cause 'NoneType' errors
+            old_final_video_before_thumbnail = final_video
+            final_video = concatenate_videoclips([thumbnail_clip, final_video], method="compose")
+        else:
+            # No thumbnail to prepend
+            old_final_video_before_thumbnail = None
         
         # Get actual video duration
         actual_video_duration = final_video.duration
@@ -1815,11 +2016,12 @@ def create_beat_synced_video(
         # Clean up intermediate clips that were used in concatenation/subclipping
         # These can now be safely closed since rendering is complete
         try:
-            thumbnail_clip.close()
+            if 'thumbnail_clip' in locals() and thumbnail_clip is not None:
+                thumbnail_clip.close()
         except:
             pass
         try:
-            if 'old_final_video_before_thumbnail' in locals():
+            if 'old_final_video_before_thumbnail' in locals() and old_final_video_before_thumbnail is not None:
                 old_final_video_before_thumbnail.close()
         except:
             pass
