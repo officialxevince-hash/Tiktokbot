@@ -1418,6 +1418,31 @@ def create_beat_synced_video(
         # Clean up clip cache after segment creation
         cleanup_clip_cache()
         
+        # CRITICAL: Write concatenated video to temporary file and reload it
+        # This ensures all segments are closed and final_video is independent
+        # Prevents "NoneType" errors from segments with None readers
+        # Initialize variable for cleanup later
+        temp_concatenated_path = None
+        try:
+            print(colored(f"[+] Writing concatenated video to temporary file to release segment handles...", "cyan"))
+            temp_concatenated_path = os.path.join(temp_dir, f"concatenated_{uuid.uuid4().hex}.mp4")
+            # Write concatenated video with fast settings
+            final_video.write_videofile(temp_concatenated_path, codec='libx264', preset='ultrafast', 
+                                       bitrate='3000k', audio=False, logger=None, threads=1)
+            # Close the CompositeVideoClip to release all segment references
+            old_final_video_composite = final_video
+            final_video.close()
+            del old_final_video_composite
+            gc.collect()
+            # Reload as a single VideoFileClip (independent, no segment references)
+            final_video = VideoFileClip(temp_concatenated_path)
+            print(colored(f"[+] Concatenated video written and reloaded - all segments closed", "green"))
+        except Exception as e:
+            print(colored(f"[!] Warning: Failed to write/reload concatenated video: {e}", "yellow"))
+            print(colored(f"[!] Continuing with CompositeVideoClip (may have file handle issues)", "yellow"))
+            temp_concatenated_path = None  # Clear path if writing failed
+            # If writing fails, continue with CompositeVideoClip (might work, might not)
+        
         # Create and prepend interesting thumbnail
         print(colored(f"[+] Creating interesting thumbnail...", "cyan"))
         try:
@@ -2026,8 +2051,14 @@ def create_beat_synced_video(
         except:
             pass
         try:
-            if 'old_final_video_before_trim' in locals():
+            if 'old_final_video_before_trim' in locals() and old_final_video_before_trim is not None:
                 old_final_video_before_trim.close()
+        except:
+            pass
+        # Clean up temporary concatenated file if it was created
+        try:
+            if 'temp_concatenated_path' in locals() and os.path.exists(temp_concatenated_path):
+                os.remove(temp_concatenated_path)
         except:
             pass
         
