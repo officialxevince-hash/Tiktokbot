@@ -975,6 +975,14 @@ def create_beat_synced_video(
                 # Clip is shorter than needed, use it fully
                 segment = selected_clip.subclip(0, min(clip_duration, segment_duration))
             
+            # CRITICAL: Close parent clip immediately after creating subclip to free file handle
+            # The subclip is independent and doesn't need the parent clip's file handle open
+            try:
+                selected_clip.close()
+                del selected_clip
+            except:
+                pass
+            
             # Determine if we're in hook phase (first 3 seconds)
             is_hook_phase = current_video_time < HOOK_DURATION
             is_finish_phase = current_video_time >= duration * 0.9
@@ -1040,15 +1048,7 @@ def create_beat_synced_video(
             video_segments.append(segment)
             current_video_time += segment_duration
             
-            # CRITICAL: Clear reference to parent clip to free memory
-            # Subclips may hold references to parent, preventing garbage collection
-            try:
-                # Force Python to release reference
-                del selected_clip
-            except:
-                pass
-            
-            # Periodic cleanup to prevent memory buildup
+            # Periodic cleanup to prevent memory and file descriptor buildup
             if i > 0 and i % 5 == 0:  # Every 5 segments (more frequent for large clips)
                 gc.collect()  # Force garbage collection
                 if len(video_segments) > 30:  # Lowered threshold for warning
@@ -1062,6 +1062,21 @@ def create_beat_synced_video(
                             print(colored(f"[!] Warning: Memory usage is {memory.percent:.1f}%", "yellow"))
                     except:
                         pass
+                
+                # Check file descriptor usage (macOS/Linux)
+                try:
+                    import resource
+                    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+                    # Get current open file count (approximate)
+                    import subprocess
+                    import os
+                    proc = subprocess.Popen(['lsof', '-p', str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    stdout, _ = proc.communicate()
+                    open_files = len([line for line in stdout.decode().split('\n') if line.strip()])
+                    if open_files > soft * 0.8:  # Warn if using more than 80% of limit
+                        print(colored(f"[!] Warning: {open_files} file descriptors open (limit: {soft})", "yellow"))
+                except:
+                    pass  # Skip if lsof not available or on Windows
         
         if not video_segments:
             error_msg = (
@@ -1166,7 +1181,21 @@ def create_beat_synced_video(
         print(colored(f"[+] Creating interesting thumbnail...", "cyan"))
         thumbnail_clip = create_interesting_thumbnail(final_video, interesting_times=interesting_times, thumbnail_duration=0.2)
         # Prepend thumbnail to make it the first frame (TikTok uses first frame as thumbnail)
+        # Store reference to old final_video so we can close it after concatenation
+        old_final_video = final_video
         final_video = concatenate_videoclips([thumbnail_clip, final_video], method="compose")
+        
+        # CRITICAL: Close intermediate clips to free file handles before rendering
+        try:
+            thumbnail_clip.close()
+        except:
+            pass
+        try:
+            old_final_video.close()
+        except:
+            pass
+        del thumbnail_clip, old_final_video
+        gc.collect()  # Force cleanup
         
         # Get actual video duration
         actual_video_duration = final_video.duration
@@ -1176,7 +1205,16 @@ def create_beat_synced_video(
         
         # Trim both video and audio to match
         if actual_video_duration > final_duration:
+            # Store reference to old final_video before subclip
+            old_final_video = final_video
             final_video = final_video.subclip(0, final_duration)
+            # Close old clip after subclip
+            try:
+                old_final_video.close()
+            except:
+                pass
+            del old_final_video
+            gc.collect()
         
         # Trim audio to match video duration and set proper audio properties
         audio = audio.subclip(0, final_duration)
