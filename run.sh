@@ -89,8 +89,23 @@ if [ ! -d "$SIGNATURE_DIR" ]; then
 fi
 
 cd "$SIGNATURE_DIR"
-echo -e "${GREEN}[+] Installing dependencies with bun...${NC}"
-bun install
+
+# Check if npm is available (needed for Playwright post-install scripts)
+if command -v npm &> /dev/null; then
+    echo -e "${GREEN}[+] Installing dependencies with npm (required for Playwright)...${NC}"
+    npm install
+else
+    echo -e "${YELLOW}[!] npm not found, trying bun...${NC}"
+    echo -e "${YELLOW}[!] Note: Playwright may not install correctly with bun${NC}"
+    bun install
+    # Verify Playwright installation
+    if [ ! -d "node_modules/playwright-core/lib" ]; then
+        echo -e "${RED}[-] Error: Playwright installation incomplete with bun${NC}"
+        echo -e "${YELLOW}[!] Please install npm and run: npm install${NC}"
+        exit 1
+    fi
+fi
+
 cd "$SCRIPT_DIR"
 
 # Step 4: Check for .env file

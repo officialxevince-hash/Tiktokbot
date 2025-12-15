@@ -17,6 +17,8 @@ import gc
 import time
 import threading
 import signal
+import gc
+import time
 from typing import List, Optional, Tuple
 from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips, VideoClip
 from moviepy.video.fx.all import crop, resize, rotate
@@ -1071,23 +1073,30 @@ def create_beat_synced_video(
             cleanup_clip_cache()  # Clean up before raising error
             raise ValueError(error_msg)
         
-        print(colored(f"[+] Successfully created {len(video_segments)} video segments from {clips_loaded_count} clips", "green"))
+        # Save segment count before cleanup (needed for later logging)
+        num_segments_created = len(video_segments)
+        
+        print(colored(f"[+] Successfully created {num_segments_created} video segments from {clips_loaded_count} clips", "green"))
         
         # Clean up clip cache before concatenation (frees memory)
         cleanup_clip_cache()
-            
+        
+        # CRITICAL: Force aggressive garbage collection before concatenation
+        gc.collect()
+        gc.collect()  # Call twice to ensure cleanup
+        
         # Concatenate all segments - use memory-efficient method for large videos
-        print(colored(f"[+] Combining {len(video_segments)} video segments", "cyan"))
+        print(colored(f"[+] Combining {num_segments_created} video segments", "cyan"))
         
         # For very large videos, concatenate in chunks to reduce memory
-        if len(video_segments) > 100:
-            print(colored(f"[!] Large number of segments ({len(video_segments)}), using chunked concatenation", "yellow"))
+        if num_segments_created > 100:
+            print(colored(f"[!] Large number of segments ({num_segments_created}), using chunked concatenation", "yellow"))
             # Concatenate in chunks of 50 segments
             chunk_size = 50
             chunked_videos = []
             
-            for chunk_start in range(0, len(video_segments), chunk_size):
-                chunk_end = min(chunk_start + chunk_size, len(video_segments))
+            for chunk_start in range(0, num_segments_created, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, num_segments_created)
                 chunk = video_segments[chunk_start:chunk_end]
                 
                 print(colored(f"[+] Concatenating chunk {chunk_start//chunk_size + 1} ({len(chunk)} segments)...", "cyan"))
@@ -1109,27 +1118,46 @@ def create_beat_synced_video(
             final_video = concatenate_videoclips(chunked_videos, method="compose")
             final_video = final_video.set_fps(30)
             
-            # Clean up chunks
+            # CRITICAL: Aggressively clean up chunks and segments to free memory
             for chunk_video in chunked_videos:
                 try:
                     chunk_video.close()
                 except:
                     pass
             chunked_videos.clear()
+            del chunked_videos
+            
+            # Also clear video_segments list (they're now in final_video)
+            for seg in video_segments:
+                try:
+                    seg.close()
+                except:
+                    pass
+            video_segments.clear()
+            del video_segments
+            
+            # Force aggressive garbage collection
+            gc.collect()
+            gc.collect()
+            time.sleep(1)  # Give system time to free memory
         else:
             # Normal concatenation for smaller videos
             final_video = concatenate_videoclips(video_segments, method="compose")
             final_video = final_video.set_fps(30)
             
-            # Clean up segments after concatenation (they're now in final_video)
+            # CRITICAL: Aggressively clean up segments after concatenation
             for segment in video_segments:
                 try:
                     segment.close()
                 except:
                     pass
-        
-        video_segments.clear()
-        gc.collect()  # Force cleanup
+            video_segments.clear()
+            del video_segments
+            
+            # Force aggressive garbage collection
+            gc.collect()
+            gc.collect()
+            time.sleep(1)  # Give system time to free memory
         
         # Clean up clip cache after segment creation
         cleanup_clip_cache()
@@ -1176,7 +1204,7 @@ def create_beat_synced_video(
         
         # Write video with audio - optimized for large videos and stability
         print(colored(f"[+] Rendering video to {output_path}", "cyan"))
-        print(colored(f"[+] Video duration: {final_video.duration:.2f}s, Segments: {len(video_segments)}", "cyan"))
+        print(colored(f"[+] Video duration: {final_video.duration:.2f}s, Segments: {num_segments_created}", "cyan"))
         print(colored(f"[+] Temporary files will be saved in: {os.path.abspath(temp_dir)}", "cyan"))
         
         # AGGRESSIVE resource checks to prevent system crashes
@@ -1194,20 +1222,59 @@ def create_beat_synced_video(
             except (AttributeError, OSError):
                 pass  # Not supported on this system
             
-            # Check available memory - abort if less than 2GB free
+            # Check available memory - try to free memory first, then check
+            # Force aggressive garbage collection before checking
+            gc.collect()
+            gc.collect()
+            time.sleep(2)  # Give system time to free memory
+            
             memory = psutil.virtual_memory()
             available_gb = memory.available / (1024 ** 3)
             memory_percent = memory.percent
             print(colored(f"[+] System resources: {available_gb:.1f}GB RAM available ({memory_percent:.1f}% used)", "cyan"))
             
-            if available_gb < 2.0:
-                raise RuntimeError(f"Insufficient memory for rendering: {available_gb:.1f}GB available (need at least 2GB)")
+            # Adaptive memory requirement based on video complexity
+            # Since we've already done heavy processing (segments created, concatenated),
+            # rendering needs less memory. Use more lenient thresholds.
+            if num_segments_created < 50:
+                min_memory_required = 1.2  # Simple videos: 1.2GB minimum
+            elif num_segments_created < 100:
+                min_memory_required = 1.4  # Medium videos: 1.4GB minimum
+            else:
+                min_memory_required = 1.5  # Large videos: 1.5GB minimum (was 2.0GB)
+            
+            if available_gb < min_memory_required:
+                # Try waiting for memory to free up (other processes might release memory)
+                print(colored(f"[!] Low memory ({available_gb:.1f}GB), waiting up to 30s for memory to free...", "yellow"))
+                for wait_attempt in range(6):  # 6 attempts × 5 seconds = 30 seconds
+                    time.sleep(5)
+                    memory = psutil.virtual_memory()
+                    available_gb = memory.available / (1024 ** 3)
+                    memory_percent = memory.percent
+                    print(colored(f"[!] Memory check {wait_attempt + 1}/6: {available_gb:.1f}GB available ({memory_percent:.1f}% used)", "yellow"))
+                    
+                    if available_gb >= min_memory_required:
+                        print(colored(f"[+] Memory freed! Proceeding with rendering...", "green"))
+                        break
+                    
+                    # Force another GC attempt
+                    gc.collect()
+                    gc.collect()
+                else:
+                    # Still not enough memory after waiting - but allow rendering with even less if we're close
+                    # Since segments are already created and concatenated, rendering is less memory-intensive
+                    absolute_minimum = 1.0  # Absolute minimum: 1GB
+                    if available_gb >= absolute_minimum:
+                        print(colored(f"[!] Warning: Low memory ({available_gb:.1f}GB), but proceeding with ultra-conservative settings", "yellow"))
+                        # Will use ultra-safe rendering settings automatically
+                    else:
+                        raise RuntimeError(f"Insufficient memory for rendering: {available_gb:.1f}GB available (need at least {absolute_minimum}GB)")
             
             if memory_percent > 85:
                 print(colored(f"[!] Warning: Memory usage is {memory_percent:.1f}%, waiting...", "yellow"))
                 time.sleep(15)  # Wait for memory to free up
                 memory = psutil.virtual_memory()
-                if memory.percent > 85:
+                if memory.percent > 90:  # Only abort if very high (was 85)
                     raise RuntimeError(f"Memory too high: {memory.percent:.1f}% (system may crash)")
             
             # Check disk space - abort if less than 5GB free
@@ -1254,33 +1321,88 @@ def create_beat_synced_video(
         except:
             pass  # Resource manager not available, continue anyway
         
+        # Detect GPU hardware acceleration availability
+        def detect_gpu_codec():
+            """Detect available GPU hardware encoder."""
+            try:
+                # Check for VideoToolbox (macOS)
+                result = subprocess.run(
+                    ['ffmpeg', '-hide_banner', '-encoders'],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=5
+                )
+                encoders_output = result.stdout.decode() + result.stderr.decode()
+                
+                if 'h264_videotoolbox' in encoders_output:
+                    print(colored("[+] GPU acceleration available: VideoToolbox (macOS)", "green"))
+                    return 'h264_videotoolbox'
+                elif 'h264_nvenc' in encoders_output:
+                    print(colored("[+] GPU acceleration available: NVENC (NVIDIA)", "green"))
+                    return 'h264_nvenc'
+                elif 'h264_qsv' in encoders_output:
+                    print(colored("[+] GPU acceleration available: Quick Sync Video (Intel)", "green"))
+                    return 'h264_qsv'
+                elif 'h264_amf' in encoders_output:
+                    print(colored("[+] GPU acceleration available: AMF (AMD)", "green"))
+                    return 'h264_amf'
+                else:
+                    print(colored("[!] No GPU acceleration found, using CPU encoding", "yellow"))
+                    return None
+            except Exception as e:
+                print(colored(f"[!] Could not detect GPU acceleration: {e}, using CPU encoding", "yellow"))
+                return None
+        
+        # Detect GPU codec
+        gpu_codec = detect_gpu_codec()
+        
         # Use balanced settings: safe but not too slow
         # Too slow = appears frozen, too fast = crashes system
         video_duration = final_video.duration
-        num_segments = len(video_segments)
+        num_segments = num_segments_created
         is_large_video = video_duration > 30 or num_segments > 60
         
         # Adaptive settings based on video complexity
-        if num_segments > 100:
-            # Very many segments - use safest settings
-            render_preset = 'ultrafast'
-            render_bitrate = '4000k'
-            render_threads = 1
-            print(colored(f"[!] Many segments ({num_segments}), using safest settings", "yellow"))
-        elif num_segments > 60 or is_large_video:
-            # Many segments or long video - use safe settings
-            render_preset = 'veryfast'
-            render_bitrate = '5000k'
-            render_threads = min(threads, 2)
-            print(colored(f"[!] Moderate complexity ({num_segments} segments), using safe settings", "yellow"))
+        # With GPU, we can use faster presets since GPU doesn't stress CPU
+        if gpu_codec:
+            # GPU encoding - can use faster settings
+            if num_segments > 100:
+                render_preset = 'medium'  # GPU can handle medium preset
+                render_bitrate = '5000k'
+                render_threads = 1  # GPU doesn't need many threads
+                print(colored(f"[!] Many segments ({num_segments}), using GPU with medium preset", "yellow"))
+            elif num_segments > 60 or is_large_video:
+                render_preset = 'medium'
+                render_bitrate = '6000k'
+                render_threads = 1
+                print(colored(f"[!] Moderate complexity ({num_segments} segments), using GPU with medium preset", "yellow"))
+            else:
+                render_preset = 'medium'
+                render_bitrate = '7000k'
+                render_threads = 1
+                print(colored(f"[!] Lower complexity ({num_segments} segments), using GPU with medium preset", "yellow"))
         else:
-            # Fewer segments - can use slightly faster settings
-            render_preset = 'fast'
-            render_bitrate = '6000k'
-            render_threads = min(threads, 2)
-            print(colored(f"[!] Lower complexity ({num_segments} segments), using balanced settings", "yellow"))
+            # CPU encoding - use conservative settings
+            if num_segments > 100:
+                # Very many segments - use safest settings
+                render_preset = 'ultrafast'
+                render_bitrate = '4000k'
+                render_threads = 1
+                print(colored(f"[!] Many segments ({num_segments}), using safest CPU settings", "yellow"))
+            elif num_segments > 60 or is_large_video:
+                # Many segments or long video - use safe settings
+                render_preset = 'veryfast'
+                render_bitrate = '5000k'
+                render_threads = min(threads, 2)
+                print(colored(f"[!] Moderate complexity ({num_segments} segments), using safe CPU settings", "yellow"))
+            else:
+                # Fewer segments - can use slightly faster settings
+                render_preset = 'fast'
+                render_bitrate = '6000k'
+                render_threads = min(threads, 2)
+                print(colored(f"[!] Lower complexity ({num_segments} segments), using balanced CPU settings", "yellow"))
         
-        print(colored(f"[!] Rendering settings: Preset={render_preset}, Bitrate={render_bitrate}, Threads={render_threads}", "cyan"))
+        print(colored(f"[!] Rendering settings: Codec={gpu_codec or 'libx264'}, Preset={render_preset}, Bitrate={render_bitrate}, Threads={render_threads}", "cyan"))
         
         # Render with progress monitoring, timeout, and error handling
         max_retries = 2
@@ -1296,6 +1418,7 @@ def create_beat_synced_video(
             # Capture render settings for progress calculation
             current_preset = render_preset
             current_bitrate = render_bitrate
+            current_codec = gpu_codec if gpu_codec else 'libx264'  # Capture GPU codec
             
             # Start progress monitoring thread
             progress_monitor_active = threading.Event()
@@ -1305,6 +1428,19 @@ def create_beat_synced_video(
             def monitor_progress():
                 """Monitor rendering progress and system resources to prevent crashes."""
                 nonlocal last_size, no_progress_count
+                # Check if we're using GPU (less RAM/CPU intensive)
+                using_gpu = current_codec != 'libx264'
+                
+                # Log monitoring mode
+                if using_gpu:
+                    print(colored(f"[+] Resource monitoring: GPU mode (lenient thresholds)", "green"))
+                else:
+                    print(colored(f"[+] Resource monitoring: CPU mode (stricter thresholds)", "yellow"))
+                
+                # Track consecutive high CPU readings (only abort after sustained high usage)
+                high_cpu_count = 0
+                max_high_cpu_checks = 3 if using_gpu else 2  # Allow more spikes with GPU
+                
                 while progress_monitor_active.is_set() and not freeze_detected.is_set():
                     time.sleep(check_interval)
                     
@@ -1314,23 +1450,56 @@ def create_beat_synced_video(
                         memory = psutil.virtual_memory()
                         cpu_percent = psutil.cpu_percent(interval=0.5)
                         
+                        # More lenient thresholds when using GPU (GPU uses less RAM/CPU)
+                        if using_gpu:
+                            # GPU rendering - very lenient thresholds (GPU handles most work)
+                            memory_threshold = 97.0  # Allow up to 97% memory usage
+                            min_free_gb = 0.3  # Only need 300MB free (GPU uses less RAM)
+                            cpu_threshold = 99.0  # Warn at 99%
+                            cpu_critical = 100.0  # Only abort if CPU stays at 100% for sustained period
+                        else:
+                            # CPU rendering - stricter thresholds
+                            memory_threshold = 92.0
+                            min_free_gb = 1.0
+                            cpu_threshold = 95.0
+                            cpu_critical = 98.0
+                        
                         # Emergency abort if resources are critically high (prevent system crash)
-                        if memory.percent > 92:
-                            print(colored(f"[-] CRITICAL: Memory at {memory.percent:.1f}% - ABORTING to prevent crash", "red"))
+                        if memory.percent > memory_threshold:
+                            print(colored(f"[-] CRITICAL: Memory at {memory.percent:.1f}% (threshold: {memory_threshold}%) - ABORTING to prevent crash", "red"))
+                            print(colored(f"    Using {'GPU' if using_gpu else 'CPU'} rendering thresholds", "yellow"))
                             freeze_detected.set()
-                            raise RuntimeError(f"Memory critically high: {memory.percent:.1f}% - aborting to prevent system crash")
+                            raise RuntimeError(f"Memory critically high: {memory.percent:.1f}% (threshold: {memory_threshold}%) - aborting to prevent system crash")
                         
-                        if memory.available / (1024 ** 3) < 1.0:  # Less than 1GB free
-                            print(colored(f"[-] CRITICAL: Less than 1GB RAM free - ABORTING", "red"))
+                        free_gb = memory.available / (1024 ** 3)
+                        if free_gb < min_free_gb:
+                            print(colored(f"[-] CRITICAL: Less than {min_free_gb}GB RAM free ({free_gb:.2f}GB available) - ABORTING", "red"))
+                            print(colored(f"    Using {'GPU' if using_gpu else 'CPU'} rendering thresholds", "yellow"))
                             freeze_detected.set()
-                            raise RuntimeError("Less than 1GB RAM available - aborting to prevent system crash")
+                            raise RuntimeError(f"Less than {min_free_gb}GB RAM available ({free_gb:.2f}GB free) - aborting to prevent system crash")
                         
-                        if cpu_percent > 95:
-                            print(colored(f"[-] CRITICAL: CPU at {cpu_percent:.1f}% - system may crash", "red"))
-                            # Abort if CPU is critically high for too long
-                            if cpu_percent > 98:
-                                freeze_detected.set()
-                                raise RuntimeError(f"CPU critically high: {cpu_percent:.1f}% - aborting to prevent system crash")
+                        # CPU monitoring: allow brief spikes, only abort on sustained high usage
+                        if cpu_percent > cpu_threshold:
+                            high_cpu_count += 1
+                            if cpu_percent >= cpu_critical:
+                                # CPU is at or above critical threshold - warn and potentially abort
+                                print(colored(f"[-] WARNING: CPU at {cpu_percent:.1f}% ({high_cpu_count}/{max_high_cpu_checks} consecutive checks)", "yellow"))
+                                print(colored(f"    Using {'GPU' if using_gpu else 'CPU'} rendering thresholds (critical: {cpu_critical}%)", "yellow"))
+                                # Only abort if CPU stays critically high for multiple consecutive checks
+                                if high_cpu_count >= max_high_cpu_checks:
+                                    print(colored(f"[-] CRITICAL: CPU sustained at {cpu_percent:.1f}% for {high_cpu_count} checks - ABORTING", "red"))
+                                    freeze_detected.set()
+                                    raise RuntimeError(f"CPU critically high: {cpu_percent:.1f}% sustained for {high_cpu_count} checks - aborting to prevent system crash")
+                            else:
+                                # CPU is above warning threshold but below critical - just warn
+                                if high_cpu_count == 1:  # Only print once when first detected
+                                    print(colored(f"[!] CPU elevated at {cpu_percent:.1f}% (threshold: {cpu_threshold}%) - monitoring", "yellow"))
+                                # Reset counter if CPU drops below critical (but still above threshold)
+                                high_cpu_count = 0
+                        else:
+                            # CPU is normal, reset counter
+                            if high_cpu_count > 0:
+                                high_cpu_count = 0
                     except ImportError:
                         pass
                     except RuntimeError:
@@ -1383,21 +1552,46 @@ def create_beat_synced_video(
             
             try:
                 # Render with optimized settings
-                final_video.write_videofile(
-                    output_path,
-                    threads=render_threads,
-                    codec='libx264',
-                    audio_codec='aac',
-                    preset=render_preset,
-                    bitrate=render_bitrate,
-                    fps=30,
-                    audio_bitrate='192k',
-                    audio_fps=44100,
-                    temp_audiofile=temp_audio_path,
-                    remove_temp=True,
-                    logger=None,  # Suppress verbose output to reduce memory
-                    write_logfile=False  # Don't write log file
-                )
+                # Use GPU codec if available, otherwise fall back to CPU
+                render_codec = gpu_codec if gpu_codec else 'libx264'
+                
+                # Build write_videofile parameters
+                # Note: output_path is the first positional argument, not a keyword
+                write_params = {
+                    'threads': render_threads,
+                    'codec': render_codec,
+                    'audio_codec': 'aac',
+                    'bitrate': render_bitrate,
+                    'fps': 30,
+                    'audio_bitrate': '192k',
+                    'audio_fps': 44100,
+                    'temp_audiofile': temp_audio_path,
+                    'remove_temp': True,
+                    'logger': None,  # Suppress verbose output to reduce memory
+                    'write_logfile': False  # Don't write log file
+                }
+                
+                # Configure codec-specific parameters
+                if render_codec == 'libx264':
+                    # CPU encoding - use preset
+                    write_params['preset'] = render_preset
+                elif render_codec == 'h264_videotoolbox':
+                    # VideoToolbox (macOS) - use FFmpeg parameters for quality control
+                    # VideoToolbox uses -allow_sw 1 and -realtime 1 for faster encoding
+                    write_params['ffmpeg_params'] = [
+                        '-allow_sw', '1',  # Allow software fallback
+                        '-realtime', '1',  # Real-time encoding (faster)
+                        '-pix_fmt', 'yuv420p'  # Ensure compatibility
+                    ]
+                elif render_codec == 'h264_nvenc':
+                    # NVENC (NVIDIA) - use preset
+                    write_params['preset'] = 'p4'  # Balanced preset for NVENC
+                elif render_codec in ['h264_qsv', 'h264_amf']:
+                    # Intel QSV or AMD AMF - use preset
+                    write_params['preset'] = 'medium'
+                
+                # output_path is the first positional argument
+                final_video.write_videofile(output_path, **write_params)
                 
                 # Check if freeze was detected
                 if freeze_detected.is_set():

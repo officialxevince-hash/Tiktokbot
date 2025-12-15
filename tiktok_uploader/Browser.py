@@ -21,10 +21,22 @@ class Browser:
                 if Browser.__instance is None:
                     # print("Creating new browser instance due to no instance found")
                     Browser.__instance = Browser()
+        else:
+            # Check if existing instance is still valid
+            instance = Browser.__instance
+            try:
+                # Try to access window_handles to check if browser is still alive
+                _ = instance._driver.window_handles
+            except Exception:
+                # Browser was closed, create a new instance
+                with threading.Lock():
+                    if Browser.__instance is instance:  # Double-check
+                        Browser.__instance = None
+                        Browser.__instance = Browser()
         return Browser.__instance
 
     def __init__(self):
-        if Browser.__instance is not None:
+        if Browser.__instance is not None and Browser.__instance is not self:
             raise Exception("This class is a singleton!")
         else:
             Browser.__instance = self
@@ -52,6 +64,14 @@ class Browser:
 
     @property
     def driver(self):
+        # Check if driver is still valid before returning
+        try:
+            _ = self._driver.window_handles
+        except Exception:
+            # Driver was closed, create a new one
+            options = uc.ChromeOptions()
+            self._driver = uc.Chrome(options=options)
+            self.with_random_user_agent()
         return self._driver
 
     def load_cookies_from_file(self, filename):
@@ -62,6 +82,19 @@ class Browser:
 
     def save_cookies(self, filename: str, cookies:list=None):
         save_cookies_to_file(cookies, filename)
+    
+    @staticmethod
+    def reset():
+        """Reset the singleton instance. Useful after closing the browser."""
+        Browser.__instance = None
+    
+    def quit(self):
+        """Quit the browser and reset the singleton."""
+        try:
+            self._driver.quit()
+        except:
+            pass
+        Browser.__instance = None
 
 
 if __name__ == "__main__":

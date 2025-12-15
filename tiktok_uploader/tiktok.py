@@ -29,25 +29,39 @@ def login(login_name: str):
 		print("Unnecessary login: session already saved!")
 		return session_cookie["value"]
 
-	browser = Browser.get()
-	login_url = os.getenv("TIKTOK_LOGIN_URL", "https://www.tiktok.com/login")
-	response = browser.driver.get(login_url)
+	try:
+		browser = Browser.get()
+		login_url = os.getenv("TIKTOK_LOGIN_URL", "https://www.tiktok.com/login")
+		
+		# Ensure browser window is open and valid
+		try:
+			_ = browser.driver.window_handles
+		except Exception:
+			# Browser was closed, get a fresh instance
+			Browser.reset()
+			browser = Browser.get()
+		
+		response = browser.driver.get(login_url)
 
-	session_cookies = []
-	cookie_name = None
-	while not session_cookies:
-		for cookie in browser.driver.get_cookies():
-			if cookie["name"] in ["sessionid", "tt-target-idc"]:
-				if cookie["name"] == "sessionid":
-					cookie_name = cookie
-				session_cookies.append(cookie)
+		session_cookies = []
+		cookie_name = None
+		while not session_cookies:
+			for cookie in browser.driver.get_cookies():
+				if cookie["name"] in ["sessionid", "tt-target-idc"]:
+					if cookie["name"] == "sessionid":
+						cookie_name = cookie
+					session_cookies.append(cookie)
 
-	# print("Session cookie found: ", session_cookie["value"])
-	print("Account successfully saved.")
-	browser.save_cookies(f"tiktok_session-{login_name}", session_cookies)
-	browser.driver.quit()
+		# print("Session cookie found: ", session_cookie["value"])
+		print("Account successfully saved.")
+		browser.save_cookies(f"tiktok_session-{login_name}", session_cookies)
+		browser.quit()  # Use quit() method which resets singleton
 
-	return cookie_name.get('value', '') if cookie_name else ''
+		return cookie_name.get('value', '') if cookie_name else ''
+	except Exception as e:
+		# Clear singleton on error so next attempt gets fresh browser
+		Browser.reset()
+		raise e
 
 
 # Local Code...
