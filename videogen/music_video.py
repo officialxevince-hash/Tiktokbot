@@ -1069,7 +1069,7 @@ def create_beat_synced_video(
                     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
                     # Get current open file count (approximate)
                     import subprocess
-                    import os
+                    # os is already imported at module level, don't re-import here
                     proc = subprocess.Popen(['lsof', '-p', str(os.getpid())], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     stdout, _ = proc.communicate()
                     open_files = len([line for line in stdout.decode().split('\n') if line.strip()])
