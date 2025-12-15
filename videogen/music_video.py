@@ -1181,21 +1181,12 @@ def create_beat_synced_video(
         print(colored(f"[+] Creating interesting thumbnail...", "cyan"))
         thumbnail_clip = create_interesting_thumbnail(final_video, interesting_times=interesting_times, thumbnail_duration=0.2)
         # Prepend thumbnail to make it the first frame (TikTok uses first frame as thumbnail)
-        # Store reference to old final_video so we can close it after concatenation
-        old_final_video = final_video
+        # Store reference to old final_video so we can close it after rendering (not before!)
+        # DO NOT close these clips yet - they're still referenced by the CompositeVideoClip
+        # The CompositeVideoClip created by concatenate_videoclips will reference these clips
+        # Closing them before rendering completes will cause 'NoneType' errors
+        old_final_video_before_thumbnail = final_video
         final_video = concatenate_videoclips([thumbnail_clip, final_video], method="compose")
-        
-        # CRITICAL: Close intermediate clips to free file handles before rendering
-        try:
-            thumbnail_clip.close()
-        except:
-            pass
-        try:
-            old_final_video.close()
-        except:
-            pass
-        del thumbnail_clip, old_final_video
-        gc.collect()  # Force cleanup
         
         # Get actual video duration
         actual_video_duration = final_video.duration
@@ -1206,15 +1197,12 @@ def create_beat_synced_video(
         # Trim both video and audio to match
         if actual_video_duration > final_duration:
             # Store reference to old final_video before subclip
-            old_final_video = final_video
+            # Note: We can't close this immediately because subclips may reference the parent
+            # We'll close it after rendering completes
+            old_final_video_before_trim = final_video
             final_video = final_video.subclip(0, final_duration)
-            # Close old clip after subclip
-            try:
-                old_final_video.close()
-            except:
-                pass
-            del old_final_video
-            gc.collect()
+            # Don't close old_final_video_before_trim yet - subclip may reference it
+            # Will be closed after rendering
         
         # Trim audio to match video duration and set proper audio properties
         audio = audio.subclip(0, final_duration)
@@ -1764,12 +1752,29 @@ def create_beat_synced_video(
                     raise
         
         # Clean up immediately after rendering
+        # Now safe to close clips that were used in CompositeVideoClip
         try:
             final_video.close()
         except:
             pass
         try:
             audio.close()
+        except:
+            pass
+        # Clean up intermediate clips that were used in concatenation/subclipping
+        # These can now be safely closed since rendering is complete
+        try:
+            thumbnail_clip.close()
+        except:
+            pass
+        try:
+            if 'old_final_video_before_thumbnail' in locals():
+                old_final_video_before_thumbnail.close()
+        except:
+            pass
+        try:
+            if 'old_final_video_before_trim' in locals():
+                old_final_video_before_trim.close()
         except:
             pass
         
