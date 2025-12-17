@@ -382,10 +382,10 @@ class ResourceManager:
             video_processing_window: Time window for rate limiting (seconds) - defaults from env or 3600.0
         """
         # Load from environment variables with CONSERVATIVE defaults to prevent crashes
-        # Lower thresholds to prevent system overload
-        self.cpu_threshold = float(os.getenv('RESOURCE_CPU_THRESHOLD', cpu_threshold or 75.0))  # Lowered from 85
-        self.memory_threshold = float(os.getenv('RESOURCE_MEMORY_THRESHOLD', memory_threshold or 80.0))  # Lowered from 85
-        self.disk_threshold = float(os.getenv('RESOURCE_DISK_THRESHOLD', disk_threshold or 85.0))  # Lowered from 90
+        # Thresholds set to allow normal system operation while preventing overload
+        self.cpu_threshold = float(os.getenv('RESOURCE_CPU_THRESHOLD', cpu_threshold or 85.0))
+        self.memory_threshold = float(os.getenv('RESOURCE_MEMORY_THRESHOLD', memory_threshold or 90.0))  # Increased from 80 to allow normal idle usage
+        self.disk_threshold = float(os.getenv('RESOURCE_DISK_THRESHOLD', disk_threshold or 90.0))
         self.max_concurrent_operations = int(os.getenv('RESOURCE_MAX_CONCURRENT', max_concurrent_operations or 1))
         self.video_processing_rate_limit = int(os.getenv('RESOURCE_RATE_LIMIT', video_processing_rate_limit or 1))  # Lowered from 2
         self.video_processing_window = float(os.getenv('RESOURCE_RATE_WINDOW', video_processing_window or 3600.0))
@@ -435,9 +435,11 @@ class ResourceManager:
         Returns:
             True if resources became available
         """
+        # Use less aggressive wait thresholds - only wait if resources are critically high
+        # This prevents waiting forever when system has normal idle usage
         return self.monitor.wait_for_resources(
-            cpu_threshold=self.cpu_threshold - 10.0,  # Wait for lower threshold
-            memory_threshold=self.memory_threshold - 10.0,
+            cpu_threshold=self.cpu_threshold - 5.0,  # Wait for slightly lower threshold
+            memory_threshold=self.memory_threshold - 5.0,  # Less aggressive wait
             disk_threshold=self.disk_threshold - 5.0,
             max_wait=max_wait
         )

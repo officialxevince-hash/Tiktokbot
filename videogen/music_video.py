@@ -12,15 +12,11 @@ import os
 import random
 import uuid
 import subprocess
-import tempfile
 import gc
 import time
 import threading
-import signal
-import gc
-import time
 from typing import List, Optional, Tuple
-from moviepy.editor import VideoFileClip, AudioFileClip, CompositeVideoClip, concatenate_videoclips, VideoClip
+from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips, VideoClip
 from moviepy.video.fx.all import crop, resize, rotate
 from termcolor import colored
 import logging
@@ -30,15 +26,226 @@ from videogen.video_effects import (
     apply_zoom_effect,
     apply_flash_effect,
     apply_rgb_shift,
-    apply_hue_rotation,
     apply_prism_effect,
     apply_jump_cut,
-    apply_fast_cut,
-    apply_random_effect
+    apply_fast_cut  # Used on line 1251
 )
 
 logger = logging.getLogger(__name__)
 
+
+# ============================================================================
+# Helper Functions for Code Reusability
+# ============================================================================
+
+def validate_video_file(clip_path: str, min_size_bytes: int = 1024) -> None:
+    """
+    Validate that a video file exists, is readable, and has minimum size.
+    
+    Args:
+        clip_path: Path to video file
+        min_size_bytes: Minimum file size in bytes
+        
+    Raises:
+        FileNotFoundError: If file doesn't exist
+        PermissionError: If file is not readable
+        ValueError: If file is too small (likely corrupted)
+    """
+    if not os.path.exists(clip_path):
+        raise FileNotFoundError(f"Clip file not found: {clip_path}")
+    
+    if not os.access(clip_path, os.R_OK):
+        raise PermissionError(f"Cannot read clip file: {clip_path}")
+    
+    file_size = os.path.getsize(clip_path)
+    if file_size < min_size_bytes:
+        raise ValueError(f"Clip file too small (likely corrupted): {clip_path}")
+
+
+def validate_segment(seg, index: int = None) -> bool:
+    """
+    Validate a video segment for use in concatenation.
+    
+    Args:
+        seg: Video segment to validate
+        index: Optional index for error messages
+        
+    Returns:
+        bool: True if valid, False otherwise
+    """
+    try:
+        if seg is None:
+            return False
+        
+        if hasattr(seg, 'reader') and seg.reader is None:
+            return False
+        
+        seg_duration = seg.duration
+        if seg_duration <= 0:
+            return False
+        
+        if hasattr(seg, 'get_frame'):
+            test_frame = seg.get_frame(0)
+            if test_frame is None:
+                return False
+        
+        return True
+    except (AttributeError, ValueError) as e:
+        if index is not None:
+            logger.debug(f"Segment {index} validation failed: {e}")
+        return False
+
+
+def validate_segments(video_segments: List, verbose: bool = True) -> List:
+    """
+    Validate and filter video segments, removing invalid ones.
+    
+    Args:
+        video_segments: List of video segments to validate
+        verbose: Whether to print warnings for invalid segments
+        
+    Returns:
+        List: List of valid segments
+    """
+    valid_segments = []
+    invalid_count = 0
+    
+    for i, seg in enumerate(video_segments):
+        if validate_segment(seg, index=i):
+            valid_segments.append(seg)
+        else:
+            invalid_count += 1
+            if verbose:
+                print(colored(f"[!] Warning: Segment {i} is invalid, removing", "yellow"))
+            try:
+                if hasattr(seg, 'close'):
+                    seg.close()
+            except:
+                pass
+    
+    if invalid_count > 0 and verbose:
+        print(colored(f"[!] Removed {invalid_count} invalid segments", "yellow"))
+    
+    return valid_segments
+
+
+def safe_close_clip(clip) -> None:
+    """
+    Safely close a video clip, ignoring any errors.
+    
+    Args:
+        clip: Video clip to close
+    """
+    try:
+        if clip is not None and hasattr(clip, 'close'):
+            clip.close()
+    except:
+        pass
+
+
+def format_file_size(size_bytes: int) -> str:
+    """
+    Format file size in human-readable format.
+    
+    Args:
+        size_bytes: Size in bytes
+        
+    Returns:
+        str: Formatted size string (e.g., "1.5 MB" or "2.3 GB")
+    """
+    if size_bytes < 1024 ** 2:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 ** 3:
+        return f"{size_bytes / (1024 ** 2):.1f} MB"
+    else:
+        return f"{size_bytes / (1024 ** 3):.2f} GB"
+
+
+def get_video_duration_lightweight(clip_path: str) -> Optional[float]:
+    """
+    Get video duration using ffprobe (lightweight, doesn't load video into memory).
+    
+    Args:
+        clip_path: Path to video file
+        
+    Returns:
+        Optional[float]: Duration in seconds, or None if failed
+    """
+    try:
+        probe_cmd = [
+            'ffprobe', '-v', 'error', '-show_entries',
+            'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
+            clip_path
+        ]
+        result = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+        if result.returncode == 0:
+            return float(result.stdout.decode().strip())
+    except Exception:
+        pass
+    return None
+
+
+def force_garbage_collection(count: int = 2) -> None:
+    """
+    Force garbage collection multiple times to ensure cleanup.
+    
+    Args:
+        count: Number of times to call gc.collect()
+    """
+    for _ in range(count):
+        gc.collect()
+
+
+def check_system_resources(num_segments: int = 0) -> dict:
+    """
+    Check system resources (memory, CPU, disk) and return status.
+    
+    Args:
+        num_segments: Number of video segments (for adaptive thresholds)
+        
+    Returns:
+        dict: Resource status with keys: memory_ok, cpu_ok, disk_ok, memory_percent, etc.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return {'available': False, 'error': 'psutil not available'}
+    
+    try:
+        memory = psutil.virtual_memory()
+        cpu_percent = psutil.cpu_percent(interval=0.5)
+        disk = psutil.disk_usage('/')
+        
+        # Adaptive memory requirement based on video complexity
+        if num_segments < 50:
+            min_memory_required = 1.2
+        elif num_segments < 100:
+            min_memory_required = 1.4
+        else:
+            min_memory_required = 1.5
+        
+        available_gb = memory.available / (1024 ** 3)
+        free_disk_gb = disk.free / (1024 ** 3)
+        
+        return {
+            'available': True,
+            'memory_percent': memory.percent,
+            'memory_available_gb': available_gb,
+            'memory_ok': available_gb >= min_memory_required,
+            'min_memory_required': min_memory_required,
+            'cpu_percent': cpu_percent,
+            'cpu_ok': cpu_percent < 90,
+            'disk_free_gb': free_disk_gb,
+            'disk_percent': disk.percent,
+            'disk_ok': free_disk_gb >= 5.0,
+        }
+    except Exception as e:
+        return {'available': False, 'error': str(e)}
+
+
+# ============================================================================
+# Main Functions
+# ============================================================================
 
 def create_interesting_thumbnail(video: VideoClip, interesting_times: List[float] = None, thumbnail_duration: float = 0.2) -> VideoClip:
     """
@@ -164,13 +371,17 @@ def load_local_clips(
             clips.extend(small_clips)
             print(colored(f"[+] Loaded {len(clips)} video clips (including processed segments)", "green"))
         else:
-            # Original behavior: just list all video files
+            # Original behavior: just list all video files (skip processed directory)
             video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.MOV', '.MP4')
-            clips = [
-                os.path.join(clips_directory, f) 
-                for f in os.listdir(clips_directory)
-                if f.lower().endswith(video_extensions)
-            ]
+            clips = []
+            for f in os.listdir(clips_directory):
+                # Skip processed directory and already-processed segments
+                if f == 'processed' or '_segment_' in f:
+                    continue
+                if f.lower().endswith(video_extensions):
+                    clip_path = os.path.join(clips_directory, f)
+                    if os.path.isfile(clip_path):  # Ensure it's a file, not a directory
+                        clips.append(clip_path)
             print(colored(f"[+] Found {len(clips)} video clips in {clips_directory}", "green"))
         
         return clips
@@ -235,16 +446,10 @@ def preprocess_large_clip(
         total_duration = None
         actual_clip_path = clip_path
         
+        # Try lightweight duration detection first
         try:
-            # Try to get duration using ffprobe (lightweight, no frame loading)
-            probe_cmd = [
-                'ffprobe', '-v', 'error', '-show_entries',
-                'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1',
-                clip_path
-            ]
-            result = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
-            if result.returncode == 0:
-                total_duration = float(result.stdout.decode().strip())
+            total_duration = get_video_duration_lightweight(clip_path)
+            if total_duration:
                 print(colored(f"[+] Video duration: {total_duration:.1f}s (from metadata)", "green"))
             else:
                 # Fallback: Load with MoviePy but close immediately after getting duration
@@ -252,7 +457,7 @@ def preprocess_large_clip(
                 total_duration = video.duration
                 video.close()
                 del video
-                gc.collect()
+                force_garbage_collection()
         except Exception as e:
             error_msg = str(e)
             # Check if it's a duration/metadata error (corrupted file)
@@ -261,13 +466,13 @@ def preprocess_large_clip(
                 fixed_path = try_fix_corrupted_video(clip_path, temp_dir=os.path.join(os.path.dirname(output_dir), "temp"))
                 if fixed_path:
                     try:
-                        # Try ffprobe on fixed video
-                        result = subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
-                        if result.returncode == 0:
-                            total_duration = float(result.stdout.decode().strip())
+                        # Try lightweight detection on fixed video
+                        total_duration = get_video_duration_lightweight(fixed_path)
+                        if total_duration:
                             actual_clip_path = fixed_path
                             print(colored(f"[+] Using fixed version of {os.path.basename(clip_path)}", "green"))
                         else:
+                            # Fallback to MoviePy
                             video = VideoFileClip(fixed_path)
                             total_duration = video.duration
                             video.close()
@@ -383,16 +588,11 @@ def preprocess_large_clip(
                 extracted_segments.append(output_path)
                 
                 # Force garbage collection after each segment
-                gc.collect()
+                force_garbage_collection()
                 
                 # Check output file size and display appropriately
                 output_size_bytes = os.path.getsize(output_path)
-                output_size_mb = output_size_bytes / (1024 ** 2)
-                if output_size_mb < 100:
-                    print(colored(f"[+] Segment {i+1} saved: {output_size_mb:.1f} MB", "green"))
-                else:
-                    output_size_gb = output_size_bytes / (1024 ** 3)
-                    print(colored(f"[+] Segment {i+1} saved: {output_size_gb:.2f} GB", "green"))
+                print(colored(f"[+] Segment {i+1} saved: {format_file_size(output_size_bytes)}", "green"))
                 
             except Exception as e:
                 logger.warning(colored(f"[-] Error extracting segment {i+1}: {e}", "yellow"))
@@ -400,7 +600,7 @@ def preprocess_large_clip(
         
         # Video was never loaded into memory (we used ffprobe), so no need to close
         # But ensure any remaining references are cleared
-        gc.collect()
+        force_garbage_collection()
         
         if not extracted_segments:
             print(colored(f"[-] No segments extracted, returning original file", "yellow"))
@@ -479,9 +679,9 @@ def preprocess_clips_directory(
             
             all_clips.extend(processed_clips)
             
-            # Periodic garbage collection to prevent memory buildup
+                # Periodic garbage collection to prevent memory buildup
             if (i + 1) % 5 == 0:
-                gc.collect()
+                force_garbage_collection()
                 print(colored(f"[+] Processed {i+1}/{len(files_to_process)} files, {len(all_clips)} clips total", "green"))
         except Exception as e:
             logger.warning(colored(f"[-] Error processing {clip_path}: {e}", "yellow"))
@@ -643,17 +843,8 @@ def prepare_clip(clip_path: str, target_size: Tuple[int, int] = (1080, 1920)) ->
     Returns:
         VideoFileClip: Prepared clip
     """
-    # Quick validation: check if file exists and is readable
-    if not os.path.exists(clip_path):
-        raise FileNotFoundError(f"Clip file not found: {clip_path}")
-    
-    if not os.access(clip_path, os.R_OK):
-        raise PermissionError(f"Cannot read clip file: {clip_path}")
-    
-    # Check file size (skip empty or very small files)
-    file_size = os.path.getsize(clip_path)
-    if file_size < 1024:  # Less than 1KB is likely corrupted
-        raise ValueError(f"Clip file too small (likely corrupted): {clip_path}")
+    # Validate file before processing
+    validate_video_file(clip_path, min_size_bytes=1024)
     
     # Try to load the clip, with fallback to fixing corrupted files
     video_path = clip_path
@@ -804,8 +995,8 @@ def create_beat_synced_video(
         os.environ['TMP'] = os.path.abspath(temp_dir)
         os.environ['TEMP'] = os.path.abspath(temp_dir)
         
-        # Force garbage collection before starting
-        gc.collect()
+                # Force garbage collection before starting
+        force_garbage_collection()
         
         # Load music
         audio = AudioFileClip(music_path)
@@ -830,9 +1021,15 @@ def create_beat_synced_video(
         
         # OPTIMIZATION: Limit number of beats to prevent too many segments
         # Too many segments = very slow rendering and high memory usage
-        max_beats = int(duration * 2.5)  # Max 2.5 beats per second (reasonable for most music)
+        # For small clip libraries, use even stricter limits to prevent overload
+        max_beats_per_second = 2.0 if len(clips) < 10 else 2.5  # Stricter for small libraries
+        max_beats = int(duration * max_beats_per_second)
+        # Also enforce absolute maximum to prevent system overload
+        absolute_max_beats = min(max_beats, 100)  # Never exceed 100 beats regardless of duration
+        max_beats = absolute_max_beats
+        
         if len(beats) > max_beats:
-            print(colored(f"[!] Too many beats ({len(beats)}), limiting to {max_beats} to prevent slow rendering", "yellow"))
+            print(colored(f"[!] Too many beats ({len(beats)}), limiting to {max_beats} to prevent system overload", "yellow"))
             # Use every Nth beat to reduce count
             step = len(beats) // max_beats
             beats = beats[::step][:max_beats]
@@ -869,15 +1066,48 @@ def create_beat_synced_video(
             print(colored(f"[+] Combined intervals: {len(intervals)} -> {len(combined_intervals)} segments", "green"))
             intervals = combined_intervals
         
+        # CRITICAL: Enforce maximum segment count to prevent system overload
+        # Even with beat limiting, too many segments can overload the system
+        # For small clip libraries, use even stricter limits to prevent repeated clip processing
+        if len(clips) < 10:
+            # Small libraries: limit to ~10-15 segments per clip to avoid repeated processing
+            MAX_SEGMENTS = min(60, len(clips) * 10)  # Max 10 segments per clip, or 60 total
+        else:
+            MAX_SEGMENTS = 120  # Larger libraries can handle more segments
+        
+        if len(intervals) > MAX_SEGMENTS:
+            print(colored(f"[!] Too many segments ({len(intervals)}), limiting to {MAX_SEGMENTS} to prevent system overload", "yellow"))
+            # Use every Nth interval to reduce count
+            step = len(intervals) // MAX_SEGMENTS
+            intervals = intervals[::step][:MAX_SEGMENTS]
+            print(colored(f"[+] Using {len(intervals)} segments (every {step} intervals)", "green"))
+        
         # Validate clips
         if not clips:
             raise ValueError("No clips available")
         
-        print(colored(f"[+] Processing {len(clips)} video clips (lazy loading enabled)", "cyan"))
+        # OPTIMIZATION: For small clip libraries, pre-load all clips to avoid repeated processing
+        # For larger libraries, use lazy loading to prevent memory exhaustion
+        clip_cache = {}  # Maps clip_path -> prepared_clip
+        cache_access_order = []  # Track access order for LRU eviction
         
-        # OPTIMIZATION: Use lazy loading - don't load all clips into memory at once
-        # Instead, load clips on-demand and close them immediately after use
-        # This prevents memory exhaustion with large numbers of clips
+        if len(clips) < 10:
+            print(colored(f"[+] Small clip library ({len(clips)} clips): pre-loading all clips to avoid repeated processing", "cyan"))
+            MAX_CACHED_CLIPS = len(clips)  # Cache all clips for small libraries
+            # Pre-load all clips at once
+            print(colored(f"[+] Pre-loading {len(clips)} clips...", "cyan"))
+            for i, clip_path in enumerate(clips):
+                try:
+                    print(colored(f"[+] Pre-loading clip {i+1}/{len(clips)}: {os.path.basename(clip_path)}", "cyan"))
+                    prepared_clip = prepare_clip(clip_path)
+                    clip_cache[clip_path] = prepared_clip
+                    cache_access_order.append(clip_path)
+                except Exception as e:
+                    logger.warning(colored(f"[-] Failed to pre-load clip {clip_path}: {e}", "yellow"))
+            print(colored(f"[+] Pre-loaded {len(clip_cache)} clips successfully", "green"))
+        else:
+            print(colored(f"[+] Processing {len(clips)} video clips (lazy loading enabled)", "cyan"))
+            MAX_CACHED_CLIPS = 2  # Limited cache for large clip libraries
         
         # Create video segments synced to beats
         video_segments = []
@@ -887,12 +1117,6 @@ def create_beat_synced_video(
         
         # Hook optimization: First 3 seconds need maximum impact
         HOOK_DURATION = 3.0
-        
-        # Cache for prepared clips (VERY limited to prevent memory issues with large clips)
-        # Each cached clip is already downscaled to 1080x1920, but still uses memory
-        MAX_CACHED_CLIPS = 2  # Reduced from 5 to 2 for large clip libraries
-        clip_cache = {}  # Maps clip_path -> prepared_clip
-        cache_access_order = []  # Track access order for LRU eviction
         
         def get_prepared_clip(clip_path: str) -> Optional[VideoFileClip]:
             """Get a prepared clip, using cache if available, loading if not."""
@@ -934,7 +1158,7 @@ def create_beat_synced_video(
                     pass
             clip_cache.clear()
             cache_access_order.clear()
-            gc.collect()  # Force garbage collection
+            force_garbage_collection()
         
         clips_loaded_count = 0
         clips_failed_count = 0
@@ -975,13 +1199,16 @@ def create_beat_synced_video(
                 # Clip is shorter than needed, use it fully
                 segment = selected_clip.subclip(0, min(clip_duration, segment_duration))
             
-            # CRITICAL: Close parent clip immediately after creating subclip to free file handle
-            # The subclip is independent and doesn't need the parent clip's file handle open
-            try:
-                selected_clip.close()
-                del selected_clip
-            except:
-                pass
+            # CRITICAL: Do NOT close cached clips - subclips are independent and cached clips
+            # need to remain open for reuse. Only close if it's not in the cache (lazy-loaded).
+            # Subclips don't need the parent clip's file handle to stay open.
+            if selected_clip_path not in clip_cache:
+                # This was a lazy-loaded clip (not cached), safe to close
+                try:
+                    selected_clip.close()
+                    del selected_clip
+                except:
+                    pass
             
             # Determine if we're in hook phase (first 3 seconds)
             is_hook_phase = current_video_time < HOOK_DURATION
@@ -1048,9 +1275,13 @@ def create_beat_synced_video(
             video_segments.append(segment)
             current_video_time += segment_duration
             
+            # Progress logging for long operations
+            if (i + 1) % 10 == 0 or i == 0:
+                print(colored(f"[+] Created {i+1}/{len(intervals)} segments...", "cyan"))
+            
             # Periodic cleanup to prevent memory and file descriptor buildup
             if i > 0 and i % 5 == 0:  # Every 5 segments (more frequent for large clips)
-                gc.collect()  # Force garbage collection
+                force_garbage_collection()
                 if len(video_segments) > 30:  # Lowered threshold for warning
                     print(colored(f"[!] Memory optimization: {len(video_segments)} segments in memory", "yellow"))
                     
@@ -1152,7 +1383,7 @@ def create_beat_synced_video(
                         print(colored(f"[!] Warning: Failed to write segment {i} to disk: {e}, keeping original", "yellow"))
                 
                 # Force cleanup after each batch
-                gc.collect()
+                force_garbage_collection()
                 
                 # Progress update
                 print(colored(f"[+] Written {batch_end}/{num_segments_created} segments to disk", "cyan"))
@@ -1227,119 +1458,24 @@ def create_beat_synced_video(
                 print(colored(f"[+] {num_segments_created} segments ready for concatenation", "green"))
             
             # Final cleanup
-            gc.collect()
+            force_garbage_collection()
             print(colored(f"[+] Segments written to disk and reloaded - file handles released", "green"))
             
             # CRITICAL: Validate all segments before concatenation
-            # Remove any segments that are None or have invalid readers
-            valid_segments = []
-            invalid_count = 0
-            for i, seg in enumerate(video_segments):
-                try:
-                    # Check if segment is None
-                    if seg is None:
-                        invalid_count += 1
-                        print(colored(f"[!] Warning: Segment {i} is None, removing", "yellow"))
-                        continue
-                    
-                    # Check if it's a VideoFileClip with a None reader
-                    if hasattr(seg, 'reader') and seg.reader is None:
-                        invalid_count += 1
-                        print(colored(f"[!] Warning: Segment {i} has None reader, removing", "yellow"))
-                        try:
-                            if hasattr(seg, 'close'):
-                                seg.close()
-                        except:
-                            pass
-                        continue
-                    
-                    # Try to access duration to verify it's valid
-                    seg_duration = seg.duration
-                    if seg_duration <= 0:
-                        raise ValueError("Segment has invalid duration")
-                    
-                    # CRITICAL: For VideoFileClip, try to get a frame to verify reader is valid
-                    # This is the most reliable way to check if a segment is usable
-                    # MoviePy lazy-loads readers, so checking reader directly isn't enough
-                    if hasattr(seg, 'get_frame'):
-                        try:
-                            # Try to get first frame - this will initialize reader if needed and catch None reader errors
-                            test_frame = seg.get_frame(0)
-                            if test_frame is None:
-                                raise ValueError("Segment returned None frame")
-                        except AttributeError as e:
-                            # If error mentions 'NoneType' or 'get_frame', reader is likely None
-                            if 'NoneType' in str(e) or 'get_frame' in str(e):
-                                raise ValueError(f"Segment reader is invalid: {e}")
-                            raise
-                    
-                    valid_segments.append(seg)
-                except Exception as e:
-                    invalid_count += 1
-                    print(colored(f"[!] Warning: Segment {i} is invalid: {e}, removing", "yellow"))
-                    try:
-                        if hasattr(seg, 'close'):
-                            seg.close()
-                    except:
-                        pass
-            
-            if invalid_count > 0:
-                print(colored(f"[!] Removed {invalid_count} invalid segments before concatenation", "yellow"))
-                video_segments = valid_segments
-                num_segments_created = len(video_segments)
-                if num_segments_created == 0:
-                    raise ValueError("All segments were invalid after validation - cannot create video")
-                print(colored(f"[+] {num_segments_created} valid segments ready for concatenation", "green"))
+            video_segments = validate_segments(video_segments, verbose=True)
+            num_segments_created = len(video_segments)
+            if num_segments_created == 0:
+                raise ValueError("All segments were invalid after validation - cannot create video")
+            print(colored(f"[+] {num_segments_created} valid segments ready for concatenation", "green"))
         else:
             # Even if we didn't write segments to disk, validate them anyway
-            # This catches any segments that might have become invalid during processing
-            valid_segments = []
-            invalid_count = 0
-            for i, seg in enumerate(video_segments):
-                try:
-                    if seg is None:
-                        invalid_count += 1
-                        continue
-                    if hasattr(seg, 'reader') and seg.reader is None:
-                        invalid_count += 1
-                        continue
-                    
-                    # Check duration
-                    seg_duration = seg.duration
-                    if seg_duration <= 0:
-                        raise ValueError("Segment has invalid duration")
-                    
-                    # CRITICAL: Try to get a frame to verify reader is valid
-                    if hasattr(seg, 'get_frame'):
-                        try:
-                            test_frame = seg.get_frame(0)
-                            if test_frame is None:
-                                raise ValueError("Segment returned None frame")
-                        except AttributeError as e:
-                            if 'NoneType' in str(e) or 'get_frame' in str(e):
-                                raise ValueError(f"Segment reader is invalid: {e}")
-                            raise
-                    
-                    valid_segments.append(seg)
-                except Exception as e:
-                    invalid_count += 1
-                    print(colored(f"[!] Warning: Segment {i} is invalid: {e}, removing", "yellow"))
-                    try:
-                        if hasattr(seg, 'close'):
-                            seg.close()
-                    except:
-                        pass
-            
-            if invalid_count > 0:
-                print(colored(f"[!] Removed {invalid_count} invalid segments", "yellow"))
-                video_segments = valid_segments
-                num_segments_created = len(video_segments)
-                if num_segments_created == 0:
-                    raise ValueError("All segments were invalid - cannot create video")
+            video_segments = validate_segments(video_segments, verbose=True)
+            num_segments_created = len(video_segments)
+            if num_segments_created == 0:
+                raise ValueError("All segments were invalid - cannot create video")
         
         # CRITICAL: Force aggressive garbage collection before concatenation
-        gc.collect()
-        gc.collect()  # Call twice to ensure cleanup
+        force_garbage_collection(count=2)
         
         # Concatenate all segments - use memory-efficient method for large videos
         print(colored(f"[+] Combining {num_segments_created} video segments", "cyan"))
@@ -1351,6 +1487,7 @@ def create_beat_synced_video(
             chunk_size = 50
             chunked_videos = []
             
+            chunk_temp_files = []
             for chunk_start in range(0, num_segments_created, chunk_size):
                 chunk_end = min(chunk_start + chunk_size, num_segments_created)
                 chunk = video_segments[chunk_start:chunk_end]
@@ -1358,65 +1495,131 @@ def create_beat_synced_video(
                 print(colored(f"[+] Concatenating chunk {chunk_start//chunk_size + 1} ({len(chunk)} segments)...", "cyan"))
                 chunk_video = concatenate_videoclips(chunk, method="compose")
                 chunk_video = chunk_video.set_fps(30)
-                chunked_videos.append(chunk_video)
                 
-                # Clean up chunk segments immediately
-                for segment in chunk:
+                # CRITICAL: Write chunk to disk and reload it to make it independent
+                # This prevents None reader errors when segments are closed
+                chunk_temp_path = os.path.join(temp_dir, f"chunk_{chunk_start//chunk_size + 1}_{uuid.uuid4().hex}.mp4")
+                try:
+                    print(colored(f"[+] Writing chunk {chunk_start//chunk_size + 1} to disk...", "cyan"))
+                    chunk_video.write_videofile(chunk_temp_path, codec='libx264', preset='ultrafast',
+                                               bitrate='3000k', audio=False, logger=None, threads=1)
+                    
+                    # Close the CompositeVideoClip
+                    safe_close_clip(chunk_video)
+                    del chunk_video
+                    force_garbage_collection()
+                    
+                    # Wait for file to stabilize
+                    time.sleep(0.5)
+                    file_size = os.path.getsize(chunk_temp_path)
+                    # For very short chunks (2 segments), even 100KB might be valid
+                    # Use a more lenient threshold based on chunk size
+                    min_size = max(100 * 1024, len(chunk) * 50 * 1024)  # At least 100KB or 50KB per segment
+                    if file_size < min_size:
+                        raise ValueError(f"Chunk file too small: {file_size} bytes (expected at least {min_size})")
+                    
+                    # Reload as independent VideoFileClip
+                    chunk_video = VideoFileClip(chunk_temp_path)
+                    
+                    # Validate chunk
+                    _ = chunk_video.duration
+                    _ = chunk_video.get_frame(0)
+                    
+                    chunked_videos.append(chunk_video)
+                    chunk_temp_files.append(chunk_temp_path)
+                    print(colored(f"[+] Chunk {chunk_start//chunk_size + 1} written and reloaded successfully", "green"))
+                except Exception as e:
+                    print(colored(f"[-] Error writing chunk {chunk_start//chunk_size + 1}: {e}", "red"))
                     try:
-                        segment.close()
+                        chunk_video.close()
                     except:
                         pass
+                    # Try to continue with remaining chunks
+                    continue
+                
+                # Clean up chunk segments immediately (they're now in the written file)
+                for segment in chunk:
+                    safe_close_clip(segment)
                 
                 gc.collect()  # Force cleanup after each chunk
             
-            # Concatenate the chunks
-            print(colored(f"[+] Combining {len(chunked_videos)} video chunks...", "cyan"))
-            final_video = concatenate_videoclips(chunked_videos, method="compose")
+            if not chunked_videos:
+                raise ValueError("No valid chunks were created - cannot proceed")
+            
+            # Validate all chunks before concatenation
+            valid_chunks = []
+            for i, chunk_video in enumerate(chunked_videos):
+                if validate_segment(chunk_video, index=i+1):
+                    valid_chunks.append(chunk_video)
+                else:
+                    print(colored(f"[!] Warning: Chunk {i+1} is invalid, skipping", "yellow"))
+                    safe_close_clip(chunk_video)
+            
+            if not valid_chunks:
+                raise ValueError("No valid chunks after validation - cannot proceed")
+            
+            if len(valid_chunks) < len(chunked_videos):
+                print(colored(f"[!] Using {len(valid_chunks)} out of {len(chunked_videos)} chunks", "yellow"))
+            
+            # Concatenate the valid chunks
+            print(colored(f"[+] Combining {len(valid_chunks)} video chunks...", "cyan"))
+            final_video = concatenate_videoclips(valid_chunks, method="compose")
             final_video = final_video.set_fps(30)
             
-            # CRITICAL: Aggressively clean up chunks and segments to free memory
-            for chunk_video in chunked_videos:
-                try:
-                    chunk_video.close()
-                except:
-                    pass
-            chunked_videos.clear()
-            del chunked_videos
+            # CRITICAL: DO NOT close chunks yet - CompositeVideoClip still references them
+            # We'll close them after writing the final video to disk
+            # Store reference for cleanup later
+            chunked_videos_to_cleanup = valid_chunks.copy()
             
             # Also clear video_segments list (they're now in final_video)
-            for seg in video_segments:
-                try:
-                    seg.close()
-                except:
-                    pass
+            # CRITICAL: DO NOT close segments yet - CompositeVideoClip still references them
+            # Store reference for cleanup after writing to disk
+            segments_to_cleanup = video_segments.copy()
             video_segments.clear()
             del video_segments
             
             # Force aggressive garbage collection
-            gc.collect()
-            gc.collect()
+            force_garbage_collection(count=2)
             time.sleep(1)  # Give system time to free memory
         else:
             # Normal concatenation for smaller videos
             final_video = concatenate_videoclips(video_segments, method="compose")
             final_video = final_video.set_fps(30)
             
-            # CRITICAL: Aggressively clean up segments after concatenation
-            for segment in video_segments:
-                try:
-                    segment.close()
-                except:
-                    pass
+            # CRITICAL: DO NOT close segments yet - CompositeVideoClip still references them
+            # Store reference for cleanup after writing to disk
+            segments_to_cleanup = video_segments.copy()
             video_segments.clear()
             del video_segments
             
             # Force aggressive garbage collection
-            gc.collect()
-            gc.collect()
+            force_garbage_collection(count=2)
             time.sleep(1)  # Give system time to free memory
         
         # Clean up clip cache after segment creation
         cleanup_clip_cache()
+        
+        # CRITICAL: Validate final_video before writing
+        # This catches None reader issues early
+        # NOTE: Segments must still be open for validation to work
+        try:
+            print(colored(f"[+] Validating final video before writing...", "cyan"))
+            test_duration = final_video.duration
+            if test_duration <= 0:
+                raise ValueError("Final video has invalid duration")
+            # Try to get a frame from the middle to verify it's readable
+            test_time = min(0.1, test_duration / 2)
+            test_frame = final_video.get_frame(test_time)
+            if test_frame is None:
+                raise ValueError("Final video returned None frame")
+            print(colored(f"[+] Final video validated successfully (duration: {test_duration:.2f}s)", "green"))
+        except Exception as validation_error:
+            print(colored(f"[-] Error: Final video validation failed: {validation_error}", "red"))
+            # Clean up segments before raising error
+            if 'segments_to_cleanup' in locals():
+                for segment in segments_to_cleanup:
+                    safe_close_clip(segment)
+            raise ValueError(f"Cannot proceed: Final video is invalid: {validation_error}")
         
         # CRITICAL: Write concatenated video to temporary file and reload it
         # This ensures all segments are closed and final_video is independent
@@ -1429,19 +1632,123 @@ def create_beat_synced_video(
             # Write concatenated video with fast settings
             final_video.write_videofile(temp_concatenated_path, codec='libx264', preset='ultrafast', 
                                        bitrate='3000k', audio=False, logger=None, threads=1)
-            # Close the CompositeVideoClip to release all segment references
+            
+            # Verify file was created and has reasonable size
+            if not os.path.exists(temp_concatenated_path):
+                raise ValueError(f"Concatenated video file was not created: {temp_concatenated_path}")
+            
+            # Wait for file to be fully written (check file size stability)
+            file_size = os.path.getsize(temp_concatenated_path)
+            if file_size < 1024 * 1024:  # Less than 1MB is likely corrupted
+                raise ValueError(f"Concatenated video file is too small ({file_size} bytes), likely corrupted")
+            
+            # Wait for file size to stabilize (ensure write is complete)
+            for wait_iter in range(10):
+                time.sleep(0.5)
+                new_size = os.path.getsize(temp_concatenated_path)
+                if new_size == file_size:
+                    break  # File size stable, write complete
+                file_size = new_size
+            else:
+                print(colored(f"[!] Warning: File size still changing after 5 seconds", "yellow"))
+            
+            # Verify file is readable with ffprobe before loading with MoviePy
+            try:
+                import subprocess
+                probe_result = subprocess.run(
+                    ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', temp_concatenated_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if probe_result.returncode != 0:
+                    raise ValueError(f"ffprobe validation failed: {probe_result.stderr}")
+                duration_str = probe_result.stdout.strip()
+                if not duration_str or float(duration_str) <= 0:
+                    raise ValueError(f"Invalid duration from ffprobe: {duration_str}")
+            except Exception as probe_error:
+                print(colored(f"[!] Warning: ffprobe validation failed: {probe_error}", "yellow"))
+                # Continue anyway - MoviePy might still be able to read it
+            
+                    # Close the CompositeVideoClip to release all segment references
             old_final_video_composite = final_video
-            final_video.close()
+            safe_close_clip(final_video)
             del old_final_video_composite
-            gc.collect()
+            
+            # Now safe to close segments/chunks since final_video is written to disk
+            if 'segments_to_cleanup' in locals():
+                for segment in segments_to_cleanup:
+                    safe_close_clip(segment)
+                segments_to_cleanup.clear()
+                del segments_to_cleanup
+            
+            # Now safe to close chunks since final_video is written to disk
+            if 'chunked_videos_to_cleanup' in locals():
+                for chunk_video in chunked_videos_to_cleanup:
+                    safe_close_clip(chunk_video)
+                chunked_videos_to_cleanup.clear()
+                del chunked_videos_to_cleanup
+            
+            force_garbage_collection()
+            time.sleep(1)  # Additional pause to ensure file handles are released
+            
             # Reload as a single VideoFileClip (independent, no segment references)
-            final_video = VideoFileClip(temp_concatenated_path)
-            print(colored(f"[+] Concatenated video written and reloaded - all segments closed", "green"))
+            # Use absolute path to avoid any path issues
+            abs_temp_path = os.path.abspath(temp_concatenated_path)
+            final_video = VideoFileClip(abs_temp_path)
+            
+            # CRITICAL: Validate the reloaded video before using it
+            validation_passed = False
+            for retry_attempt in range(3):  # Try up to 3 times
+                try:
+                    # Try to access duration (this initializes the reader)
+                    test_duration = final_video.duration
+                    if test_duration <= 0:
+                        raise ValueError("Reloaded video has invalid duration")
+                    
+                    # CRITICAL: Try to get first frame to verify reader is valid
+                    # This will catch None reader issues immediately
+                    # Accessing get_frame will initialize the reader if it's None
+                    test_frame = final_video.get_frame(0)
+                    if test_frame is None:
+                        raise ValueError("Reloaded video returned None frame")
+                    
+                    # Double-check reader is not None
+                    if hasattr(final_video, 'reader') and final_video.reader is None:
+                        raise ValueError("VideoFileClip reader is None after get_frame")
+                    
+                    validation_passed = True
+                    break
+                except (AttributeError, ValueError) as validation_error:
+                    error_msg = str(validation_error)
+                    if 'NoneType' in error_msg or 'None' in error_msg or 'reader' in error_msg.lower():
+                        if retry_attempt < 2:  # Not the last attempt
+                            print(colored(f"[!] Validation attempt {retry_attempt + 1} failed (reader issue): {validation_error}, retrying...", "yellow"))
+                            try:
+                                final_video.close()
+                            except:
+                                pass
+                            time.sleep(2)  # Wait longer before retry
+                            final_video = VideoFileClip(abs_temp_path)
+                        else:
+                            # Last attempt failed
+                            print(colored(f"[-] Error: All validation attempts failed: {validation_error}", "red"))
+                            try:
+                                final_video.close()
+                            except:
+                                pass
+                            raise ValueError(f"Reloaded video reader is invalid after {retry_attempt + 1} attempts: {validation_error}")
+                    else:
+                        # Different error, re-raise
+                        raise
+            
+            if validation_passed:
+                print(colored(f"[+] Concatenated video written and reloaded - validated successfully", "green"))
         except Exception as e:
-            print(colored(f"[!] Warning: Failed to write/reload concatenated video: {e}", "yellow"))
-            print(colored(f"[!] Continuing with CompositeVideoClip (may have file handle issues)", "yellow"))
-            temp_concatenated_path = None  # Clear path if writing failed
-            # If writing fails, continue with CompositeVideoClip (might work, might not)
+            print(colored(f"[-] Error: Failed to write/reload concatenated video: {e}", "red"))
+            # If writing/reloading fails completely, we cannot safely continue
+            # The CompositeVideoClip may have invalid segment references
+            raise ValueError(f"Cannot proceed: Failed to create independent video file: {e}")
         
         # Create and prepend interesting thumbnail
         print(colored(f"[+] Creating interesting thumbnail...", "cyan"))
@@ -1473,6 +1780,13 @@ def create_beat_synced_video(
         
         # Trim both video and audio to match
         if actual_video_duration > final_duration:
+            # Before subclipping, ensure final_video is valid
+            try:
+                # Test that we can get a frame (ensures reader is valid)
+                _ = final_video.get_frame(0)
+            except Exception as e:
+                raise ValueError(f"Cannot subclip: final_video is invalid (reader issue): {e}")
+            
             # Store reference to old final_video before subclip
             # Note: We can't close this immediately because subclips may reference the parent
             # We'll close it after rendering completes
@@ -1527,26 +1841,23 @@ def create_beat_synced_video(
             
             # Check available memory - try to free memory first, then check
             # Force aggressive garbage collection before checking
-            gc.collect()
-            gc.collect()
+            force_garbage_collection(count=2)
             time.sleep(2)  # Give system time to free memory
             
-            memory = psutil.virtual_memory()
-            available_gb = memory.available / (1024 ** 3)
-            memory_percent = memory.percent
-            print(colored(f"[+] System resources: {available_gb:.1f}GB RAM available ({memory_percent:.1f}% used)", "cyan"))
-            
-            # Adaptive memory requirement based on video complexity
-            # Since we've already done heavy processing (segments created, concatenated),
-            # rendering needs less memory. Use more lenient thresholds.
-            if num_segments_created < 50:
-                min_memory_required = 1.2  # Simple videos: 1.2GB minimum
-            elif num_segments_created < 100:
-                min_memory_required = 1.4  # Medium videos: 1.4GB minimum
+            # Use helper function for resource checking
+            resources = check_system_resources(num_segments=num_segments_created)
+            if not resources.get('available'):
+                print(colored(f"[!] Warning: Could not check system resources: {resources.get('error', 'unknown')}", "yellow"))
             else:
-                min_memory_required = 1.5  # Large videos: 1.5GB minimum (was 2.0GB)
+                print(colored(
+                    f"[+] System resources: {resources['memory_available_gb']:.1f}GB RAM available "
+                    f"({resources['memory_percent']:.1f}% used)",
+                    "cyan"
+                ))
             
-            if available_gb < min_memory_required:
+            if resources.get('available') and not resources.get('memory_ok'):
+                available_gb = resources['memory_available_gb']
+                min_memory_required = resources['min_memory_required']
                 # Try waiting for memory to free up (other processes might release memory)
                 print(colored(f"[!] Low memory ({available_gb:.1f}GB), waiting up to 30s for memory to free...", "yellow"))
                 for wait_attempt in range(6):  # 6 attempts × 5 seconds = 30 seconds
@@ -1561,8 +1872,7 @@ def create_beat_synced_video(
                         break
                     
                     # Force another GC attempt
-                    gc.collect()
-                    gc.collect()
+                    force_garbage_collection(count=2)
                 else:
                     # Still not enough memory after waiting - but allow rendering with even less if we're close
                     # Since segments are already created and concatenated, rendering is less memory-intensive
@@ -1573,32 +1883,31 @@ def create_beat_synced_video(
                     else:
                         raise RuntimeError(f"Insufficient memory for rendering: {available_gb:.1f}GB available (need at least {absolute_minimum}GB)")
             
-            if memory_percent > 85:
-                print(colored(f"[!] Warning: Memory usage is {memory_percent:.1f}%, waiting...", "yellow"))
-                time.sleep(15)  # Wait for memory to free up
-                memory = psutil.virtual_memory()
-                if memory.percent > 90:  # Only abort if very high (was 85)
-                    raise RuntimeError(f"Memory too high: {memory.percent:.1f}% (system may crash)")
-            
-            # Check disk space - abort if less than 5GB free
-            disk = psutil.disk_usage('/')
-            free_gb = disk.free / (1024 ** 3)
-            disk_percent = disk.percent
-            print(colored(f"[+] Disk space: {free_gb:.1f}GB free ({disk_percent:.1f}% used)", "cyan"))
-            
-            if free_gb < 5.0:
-                raise RuntimeError(f"Insufficient disk space for rendering: {free_gb:.1f}GB free (need at least 5GB)")
-            
-            # Check CPU - abort if already very high
-            cpu_percent = psutil.cpu_percent(interval=1.0)
-            print(colored(f"[+] CPU usage: {cpu_percent:.1f}%", "cyan"))
-            
-            if cpu_percent > 90:
-                print(colored(f"[!] Warning: CPU usage is {cpu_percent:.1f}%, waiting...", "yellow"))
-                time.sleep(15)  # Wait for CPU to cool down
-                cpu_percent = psutil.cpu_percent(interval=1.0)
-                if cpu_percent > 90:
-                    raise RuntimeError(f"CPU usage too high: {cpu_percent:.1f}% (system may crash)")
+            # Check memory, disk, and CPU using resource status
+            if resources.get('available'):
+                if resources['memory_percent'] > 85:
+                    print(colored(f"[!] Warning: Memory usage is {resources['memory_percent']:.1f}%, waiting...", "yellow"))
+                    time.sleep(15)  # Wait for memory to free up
+                    resources = check_system_resources(num_segments=num_segments_created)
+                    if resources.get('memory_percent', 0) > 90:
+                        raise RuntimeError(f"Memory too high: {resources['memory_percent']:.1f}% (system may crash)")
+                
+                print(colored(
+                    f"[+] Disk space: {resources['disk_free_gb']:.1f}GB free ({resources['disk_percent']:.1f}% used)",
+                    "cyan"
+                ))
+                if not resources.get('disk_ok'):
+                    raise RuntimeError(
+                        f"Insufficient disk space for rendering: {resources['disk_free_gb']:.1f}GB free (need at least 5GB)"
+                    )
+                
+                print(colored(f"[+] CPU usage: {resources['cpu_percent']:.1f}%", "cyan"))
+                if not resources.get('cpu_ok'):
+                    print(colored(f"[!] Warning: CPU usage is {resources['cpu_percent']:.1f}%, waiting...", "yellow"))
+                    time.sleep(15)  # Wait for CPU to cool down
+                    resources = check_system_resources(num_segments=num_segments_created)
+                    if resources.get('cpu_percent', 0) > 90:
+                        raise RuntimeError(f"CPU usage too high: {resources['cpu_percent']:.1f}% (system may crash)")
         except ImportError:
             print(colored("[!] Warning: psutil not available, skipping resource checks", "yellow"))
         except Exception as e:
@@ -1907,7 +2216,7 @@ def create_beat_synced_video(
         for attempt in range(max_retries):
             try:
                 # Force garbage collection before rendering
-                gc.collect()
+                force_garbage_collection()
                 
                 print(colored(f"[+] Starting render (timeout: {rendering_timeout}s, attempt {attempt + 1}/{max_retries})", "cyan"))
                 render_start = time.time()
@@ -1993,7 +2302,7 @@ def create_beat_synced_video(
                     render_preset = 'ultrafast'
                     render_bitrate = '4000k'
                     render_threads = 1
-                    gc.collect()
+                    force_garbage_collection()
                     print(colored("[!] Retrying with ultra-low memory settings...", "yellow"))
                     time.sleep(2)  # Wait before retry
                 else:
@@ -2019,7 +2328,7 @@ def create_beat_synced_video(
                         render_bitrate = '4000k'
                         render_threads = 1
                         rendering_timeout = max(180, int(video_duration * 8))  # Shorter timeout
-                        gc.collect()
+                        force_garbage_collection()
                         print(colored("[!] Retrying with safer settings...", "yellow"))
                         time.sleep(3)  # Wait before retry to let system recover
                     else:
@@ -2030,31 +2339,17 @@ def create_beat_synced_video(
         
         # Clean up immediately after rendering
         # Now safe to close clips that were used in CompositeVideoClip
-        try:
-            final_video.close()
-        except:
-            pass
-        try:
-            audio.close()
-        except:
-            pass
+        safe_close_clip(final_video)
+        safe_close_clip(audio)
+        
         # Clean up intermediate clips that were used in concatenation/subclipping
         # These can now be safely closed since rendering is complete
-        try:
-            if 'thumbnail_clip' in locals() and thumbnail_clip is not None:
-                thumbnail_clip.close()
-        except:
-            pass
-        try:
-            if 'old_final_video_before_thumbnail' in locals() and old_final_video_before_thumbnail is not None:
-                old_final_video_before_thumbnail.close()
-        except:
-            pass
-        try:
-            if 'old_final_video_before_trim' in locals() and old_final_video_before_trim is not None:
-                old_final_video_before_trim.close()
-        except:
-            pass
+        if 'thumbnail_clip' in locals():
+            safe_close_clip(thumbnail_clip)
+        if 'old_final_video_before_thumbnail' in locals():
+            safe_close_clip(old_final_video_before_thumbnail)
+        if 'old_final_video_before_trim' in locals():
+            safe_close_clip(old_final_video_before_trim)
         # Clean up temporary concatenated file if it was created
         try:
             if 'temp_concatenated_path' in locals() and os.path.exists(temp_concatenated_path):
@@ -2063,7 +2358,7 @@ def create_beat_synced_video(
             pass
         
         # Force garbage collection after cleanup
-        gc.collect()
+        force_garbage_collection()
         
         # Final resource cleanup
         try:
@@ -2078,8 +2373,7 @@ def create_beat_synced_video(
         # Verify final output
         if os.path.exists(output_path):
             file_size = os.path.getsize(output_path)
-            file_size_mb = file_size / (1024 ** 2)
-            print(colored(f"[+] Music video created successfully: {output_path} ({file_size_mb:.1f} MB)", "green"))
+            print(colored(f"[+] Music video created successfully: {output_path} ({format_file_size(file_size)})", "green"))
         else:
             raise RuntimeError(f"Output file not found after rendering: {output_path}")
         
@@ -2088,10 +2382,3 @@ def create_beat_synced_video(
     except Exception as e:
         logger.error(colored(f"[-] Error creating music video: {e}", "red"))
         raise
-
-
-
-
-
-
-

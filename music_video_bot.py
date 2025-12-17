@@ -11,6 +11,7 @@ except ImportError:
 import os
 import sys
 import time
+import shutil
 import schedule
 import random
 from datetime import datetime, timedelta
@@ -91,7 +92,15 @@ def generate_music_video():
         
         # Load local clips
         print(colored("[+] Loading local video clips...", "cyan"))
-        clips = load_local_clips(CLIPS_DIRECTORY)
+        # Disable preprocessing for small clip libraries (<10 clips) to prevent unnecessary overhead
+        # Preprocessing is only useful for very large files (>1GB) or large clip libraries
+        num_clips_raw = len([f for f in os.listdir(CLIPS_DIRECTORY) 
+                            if f.lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.MOV', '.MP4'))])
+        use_preprocessing = num_clips_raw >= 10  # Only preprocess if 10+ clips
+        if not use_preprocessing:
+            print(colored(f"[+] Small clip library ({num_clips_raw} clips), disabling preprocessing to reduce overhead", "cyan"))
+        
+        clips = load_local_clips(CLIPS_DIRECTORY, preprocess_large_files=use_preprocessing)
         
         if not clips:
             raise ValueError(f"No video clips found in {CLIPS_DIRECTORY}")
@@ -346,6 +355,26 @@ def main():
     """
     print(colored("[+] Starting Music Video TikTok Bot", "cyan"))
     print(colored("[+] This bot creates beat-synced music videos from local clips and music", "cyan"))
+    
+    # Clean temp folder on startup
+    temp_dir = "./temp"
+    if os.path.exists(temp_dir):
+        try:
+            for filename in os.listdir(temp_dir):
+                filepath = os.path.join(temp_dir, filename)
+                try:
+                    if os.path.isfile(filepath):
+                        os.remove(filepath)
+                    elif os.path.isdir(filepath):
+                        shutil.rmtree(filepath)
+                except Exception as e:
+                    print(colored(f"[!] Warning: Could not remove {filepath}: {e}", "yellow"))
+            print(colored("[+] Temp folder cleaned on startup", "green"))
+        except Exception as e:
+            print(colored(f"[!] Warning: Could not clean temp folder: {e}", "yellow"))
+    else:
+        os.makedirs(temp_dir, exist_ok=True)
+        print(colored("[+] Temp folder created", "green"))
     
     # Check if immediate post for testing is enabled
     if IMMEDIATE_POST_FOR_TESTING:

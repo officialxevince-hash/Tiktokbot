@@ -172,6 +172,16 @@ fi
 echo -e "${GREEN}[+] Creating necessary directories...${NC}"
 mkdir -p clips music output temp CookiesDir
 
+# Clean temp folder on startup
+echo -e "${GREEN}[+] Cleaning temp folder...${NC}"
+if [ -d "temp" ]; then
+    # Remove all files in temp folder
+    find temp -type f -delete 2>/dev/null || rm -f temp/* 2>/dev/null
+    echo -e "${GREEN}[+] Temp folder cleaned${NC}"
+else
+    echo -e "${GREEN}[+] Temp folder does not exist, will be created${NC}"
+fi
+
 # Step 5: Check for TikTok login
 echo -e "\n${CYAN}[5/5] Checking TikTok login status...${NC}"
 

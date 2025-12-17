@@ -7,8 +7,7 @@ import os
 import random
 import re
 from typing import List, Tuple, Dict, Optional
-from datetime import datetime, time, timedelta
-import requests
+from datetime import datetime, timedelta
 from termcolor import colored
 from dotenv import load_dotenv
 

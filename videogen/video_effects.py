@@ -9,9 +9,7 @@ except ImportError:
     pass
 
 import numpy as np
-from moviepy.editor import VideoClip, CompositeVideoClip
-from moviepy.video.fx.all import resize, crop
-from typing import Callable, Tuple
+from moviepy.editor import VideoClip
 import random
 
 def apply_zoom_effect(clip: VideoClip, zoom_factor: float = 1.2, duration: float = 0.1) -> VideoClip:
