@@ -19,6 +19,13 @@ const OUTPUT_DIR = process.env.OUTPUT_DIR || join(__dirname, 'clips');
 await mkdir(UPLOAD_DIR, { recursive: true });
 await mkdir(OUTPUT_DIR, { recursive: true });
 
+// Increase timeout for long-running requests (Render has 30s default, we need more)
+app.use((req, res, next) => {
+  req.setTimeout(300000); // 5 minutes
+  res.setTimeout(300000);
+  next();
+});
+
 app.use(cors());
 app.use(express.json());
 app.use('/clips', express.static(OUTPUT_DIR));
@@ -79,6 +86,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 app.post('/clip', async (req, res) => {
   const startTime = Date.now();
   const startTimeISO = new Date().toISOString();
+  
   try {
     const { videoId, maxLength = 15 } = req.body;
 
@@ -306,8 +314,8 @@ async function generateTimeBasedClips(inputPath, videoId, duration, maxLength) {
   const clipsStartTime = Date.now();
   console.log(`[generateClips] Generating ${totalClips} clips in parallel batches...`);
 
-  // Process clips in parallel batches (3 at a time for speed)
-  const maxConcurrent = 3;
+  // Process clips in parallel batches (5 at a time for maximum speed on Render)
+  const maxConcurrent = 5;
   for (let i = 0; i < segments.length; i += maxConcurrent) {
     const batch = segments.slice(i, i + maxConcurrent);
     const batchStart = Date.now();
@@ -324,11 +332,13 @@ async function generateTimeBasedClips(inputPath, videoId, duration, maxLength) {
           .setDuration(clipDuration)
           .outputOptions([
             '-c:v', 'libx264',           // H.264 codec
-            '-preset', 'ultrafast',      // FASTEST encoding (lower quality but much faster)
-            '-crf', '23',                // Good quality balance
+            '-preset', 'ultrafast',      // FASTEST encoding
+            '-crf', '28',                // Lower quality for speed (28 is still acceptable)
             '-c:a', 'copy',              // Copy audio (no re-encoding = much faster!)
             '-movflags', '+faststart',   // Optimize for streaming
-            '-threads', '0'              // Use all CPU cores
+            '-threads', '0',             // Use all CPU cores
+            '-tune', 'fastdecode',       // Optimize for fast decoding
+            '-pix_fmt', 'yuv420p'        // Ensure compatibility
           ])
           .output(outputPath)
           .on('end', () => {
