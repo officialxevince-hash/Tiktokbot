@@ -8,7 +8,8 @@ export interface Clip {
 }
 
 export async function uploadVideo(uri: string, fileName: string): Promise<string> {
-  console.log('[uploadVideo] Starting upload...');
+  const startTime = performance.now();
+  console.log(`[uploadVideo] ⏱️  START - ${new Date().toISOString()}`);
   console.log('[uploadVideo] File URI:', uri);
   console.log('[uploadVideo] File name:', fileName);
   console.log('[uploadVideo] API_BASE_URL:', API_BASE_URL);
@@ -17,8 +18,11 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
   
   try {
     // Get file info
+    const fileInfoStart = performance.now();
     console.log('[uploadVideo] Getting file info...');
     const fileInfo = await FileSystem.getInfoAsync(uri);
+    const fileInfoTime = ((performance.now() - fileInfoStart) / 1000).toFixed(3);
+    console.log(`[uploadVideo] ✓ File info retrieved in ${fileInfoTime}s`);
     console.log('[uploadVideo] File info:', JSON.stringify(fileInfo, null, 2));
     
     if (!fileInfo.exists) {
@@ -43,6 +47,8 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
 
     const uploadUrl = `${API_BASE_URL}/upload`;
     console.log('[uploadVideo] Upload URL:', uploadUrl);
+    
+    const uploadStart = performance.now();
     console.log('[uploadVideo] Making fetch request...');
 
     const response = await fetch(uploadUrl, {
@@ -51,9 +57,10 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
       // Don't set Content-Type header - let fetch set it with boundary
     });
 
+    const uploadTime = ((performance.now() - uploadStart) / 1000).toFixed(3);
+    console.log(`[uploadVideo] ✓ Upload completed in ${uploadTime}s`);
     console.log('[uploadVideo] Response status:', response.status);
     console.log('[uploadVideo] Response ok:', response.ok);
-    console.log('[uploadVideo] Response headers:', JSON.stringify(Object.fromEntries(response.headers.entries()), null, 2));
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -68,19 +75,25 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
     }
 
     const data = await response.json();
-    console.log('[uploadVideo] Upload successful, videoId:', data.videoId);
+    const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
+    console.log(`[uploadVideo] ✅ SUCCESS - Total time: ${totalTime}s`);
+    console.log('[uploadVideo] Video ID:', data.videoId);
     return data.videoId;
   } catch (error) {
-    console.error('[uploadVideo] Error details:', error);
+    const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
+    console.error(`[uploadVideo] ❌ ERROR after ${totalTime}s:`, error);
     console.error('[uploadVideo] Error type:', error?.constructor?.name);
-    console.error('[uploadVideo] Error message:', error?.message);
-    console.error('[uploadVideo] Error stack:', error?.stack);
+    if (error instanceof Error) {
+      console.error('[uploadVideo] Error message:', error.message);
+      console.error('[uploadVideo] Error stack:', error.stack);
+    }
     throw error;
   }
 }
 
 export async function generateClips(videoId: string, maxLength: number = 15): Promise<Clip[]> {
-  console.log('[generateClips] Starting clip generation...');
+  const startTime = performance.now();
+  console.log(`[generateClips] ⏱️  START - ${new Date().toISOString()}`);
   console.log('[generateClips] Video ID:', videoId);
   console.log('[generateClips] Max length:', maxLength);
   console.log('[generateClips] API_BASE_URL:', API_BASE_URL);
@@ -94,6 +107,8 @@ export async function generateClips(videoId: string, maxLength: number = 15): Pr
       maxLength,
     };
     console.log('[generateClips] Request body:', JSON.stringify(requestBody, null, 2));
+    
+    const requestStart = performance.now();
     console.log('[generateClips] Making fetch request...');
 
     const response = await fetch(clipUrl, {
@@ -104,6 +119,8 @@ export async function generateClips(videoId: string, maxLength: number = 15): Pr
       body: JSON.stringify(requestBody),
     });
 
+    const requestTime = ((performance.now() - requestStart) / 1000).toFixed(3);
+    console.log(`[generateClips] ✓ Request completed in ${requestTime}s`);
     console.log('[generateClips] Response status:', response.status);
     console.log('[generateClips] Response ok:', response.ok);
 
@@ -120,14 +137,18 @@ export async function generateClips(videoId: string, maxLength: number = 15): Pr
     }
 
     const data = await response.json();
+    const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
+    console.log(`[generateClips] ✅ SUCCESS - Total time: ${totalTime}s`);
     console.log('[generateClips] Clips generated:', data.clips?.length || 0);
-    console.log('[generateClips] Clips data:', JSON.stringify(data, null, 2));
     return data.clips;
   } catch (error) {
-    console.error('[generateClips] Error details:', error);
+    const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
+    console.error(`[generateClips] ❌ ERROR after ${totalTime}s:`, error);
     console.error('[generateClips] Error type:', error?.constructor?.name);
-    console.error('[generateClips] Error message:', error?.message);
-    console.error('[generateClips] Error stack:', error?.stack);
+    if (error instanceof Error) {
+      console.error('[generateClips] Error message:', error.message);
+      console.error('[generateClips] Error stack:', error.stack);
+    }
     throw error;
   }
 }

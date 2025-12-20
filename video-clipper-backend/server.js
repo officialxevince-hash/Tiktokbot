@@ -78,6 +78,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 // POST /clip - Generate clips from video
 app.post('/clip', async (req, res) => {
   const startTime = Date.now();
+  const startTimeISO = new Date().toISOString();
   try {
     const { videoId, maxLength = 15 } = req.body;
 
@@ -86,17 +87,20 @@ app.post('/clip', async (req, res) => {
     }
 
     const video = videos.get(videoId);
-    console.log(`[POST /clip] Starting clip generation for video ${videoId} (${video.duration}s)`);
+    console.log(`[POST /clip] ⏱️  START - ${startTimeISO}`);
+    console.log(`[POST /clip] Video ID: ${videoId}, Duration: ${video.duration.toFixed(2)}s, Max length: ${maxLength}s`);
     
+    const clipsStart = Date.now();
     const clips = await generateClips(video.filePath, videoId, maxLength);
+    const clipsTime = ((Date.now() - clipsStart) / 1000).toFixed(2);
     
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(`[POST /clip] Generated ${clips.length} clips in ${elapsed}s`);
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`[POST /clip] ✅ SUCCESS - Generated ${clips.length} clips in ${clipsTime}s (total: ${totalTime}s)`);
 
     res.json({ clips });
   } catch (error) {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.error(`[POST /clip] Clipping error after ${elapsed}s:`, error);
+    console.error(`[POST /clip] ❌ ERROR after ${elapsed}s:`, error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -113,15 +117,23 @@ function getVideoDuration(filePath) {
 
 // Helper: Generate clips using FAST time-based splitting (skip slow detection for MVP)
 async function generateClips(inputPath, videoId, maxLength) {
+  const startTime = Date.now();
   try {
+    const durationStart = Date.now();
     const duration = await getVideoDuration(inputPath);
-    console.log(`[generateClips] Video duration: ${duration}s, using fast time-based splitting`);
+    const durationTime = ((Date.now() - durationStart) / 1000).toFixed(3);
+    console.log(`[generateClips] ⏱️  Video duration: ${duration.toFixed(2)}s (retrieved in ${durationTime}s)`);
+    console.log(`[generateClips] Using fast time-based splitting (no scene/silence detection)`);
     
     // For MVP: Skip slow scene/silence detection, use fast time-based splitting
     // This is much faster and good enough for MVP
-    return await generateTimeBasedClips(inputPath, videoId, duration, maxLength);
+    const clips = await generateTimeBasedClips(inputPath, videoId, duration, maxLength);
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`[generateClips] ✅ Complete in ${totalTime}s`);
+    return clips;
   } catch (error) {
-    console.error('Error in generateClips:', error);
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.error(`[generateClips] ❌ ERROR after ${totalTime}s:`, error.message);
     // Fallback to time-based splitting
     const duration = await getVideoDuration(inputPath);
     return generateTimeBasedClips(inputPath, videoId, duration, maxLength);
@@ -291,18 +303,21 @@ async function generateTimeBasedClips(inputPath, videoId, duration, maxLength) {
   }
 
   const totalClips = segments.length;
-  console.log(`[generateClips] Generating ${totalClips} clips in parallel...`);
+  const clipsStartTime = Date.now();
+  console.log(`[generateClips] Generating ${totalClips} clips in parallel batches...`);
 
   // Process clips in parallel batches (3 at a time for speed)
   const maxConcurrent = 3;
   for (let i = 0; i < segments.length; i += maxConcurrent) {
     const batch = segments.slice(i, i + maxConcurrent);
+    const batchStart = Date.now();
     const batchPromises = batch.map(({ start: clipStart, duration: clipDuration, index }) => {
       const clipId = `clip-${index}`;
       const outputPath = join(outputBase, `${clipId}.mp4`);
+      const clipStartTime = Date.now();
 
       return new Promise((resolve, reject) => {
-        console.log(`[generateClips] Processing clip ${index}/${totalClips} (${clipStart.toFixed(1)}s - ${(clipStart + clipDuration).toFixed(1)}s)`);
+        console.log(`[generateClips] 🎬 Clip ${index}/${totalClips} (${clipStart.toFixed(1)}s-${(clipStart + clipDuration).toFixed(1)}s)`);
         
         ffmpeg(inputPath)
           .setStartTime(clipStart)
@@ -317,7 +332,8 @@ async function generateTimeBasedClips(inputPath, videoId, duration, maxLength) {
           ])
           .output(outputPath)
           .on('end', () => {
-            console.log(`[generateClips] ✓ Clip ${index} completed`);
+            const clipTime = ((Date.now() - clipStartTime) / 1000).toFixed(2);
+            console.log(`[generateClips] ✓ Clip ${index} done in ${clipTime}s`);
             clips.push({
               id: clipId,
               url: `/clips/${videoId}/${clipId}.mp4`,
@@ -326,7 +342,8 @@ async function generateTimeBasedClips(inputPath, videoId, duration, maxLength) {
             resolve();
           })
           .on('error', (err) => {
-            console.error(`[generateClips] ✗ Error processing clip ${index}:`, err.message);
+            const clipTime = ((Date.now() - clipStartTime) / 1000).toFixed(2);
+            console.error(`[generateClips] ✗ Clip ${index} failed after ${clipTime}s:`, err.message);
             reject(err);
           })
           .run();
@@ -334,7 +351,12 @@ async function generateTimeBasedClips(inputPath, videoId, duration, maxLength) {
     });
 
     await Promise.all(batchPromises);
+    const batchTime = ((Date.now() - batchStart) / 1000).toFixed(2);
+    console.log(`[generateClips] ✓ Batch ${Math.floor(i / maxConcurrent) + 1} completed in ${batchTime}s`);
   }
+  
+  const clipsTime = ((Date.now() - clipsStartTime) / 1000).toFixed(2);
+  console.log(`[generateClips] ✅ All ${clips.length} clips generated in ${clipsTime}s`);
 
   // Sort clips by index
   clips.sort((a, b) => {
