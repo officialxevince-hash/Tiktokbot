@@ -67,6 +67,7 @@ pub struct Config {
     pub upload_log_interval: usize,
     pub ffmpeg: FfmpegConfig,
     pub optimization: OptimizationConfig,
+    #[allow(dead_code)] // Reserved for future timeout/limit features
     pub limits: LimitsConfig,
 }
 
@@ -189,7 +190,9 @@ impl Config {
         })
     }
 
-    // Backward compatibility
+    // Backward compatibility - deprecated, use load() instead
+    #[deprecated(note = "Use Config::load() instead")]
+    #[allow(dead_code)]
     pub fn from_env() -> Self {
         Self::load().unwrap_or_else(|e| {
             eprintln!("Warning: Failed to load config: {}. Using defaults.", e);
