@@ -2,7 +2,13 @@ import { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity, Animated } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { uploadVideo, generateClips } from '../utils/api';
+import { uploadVideo, generateClips, Clip } from '../utils/api';
+
+interface VideoItem {
+  uri: string;
+  duration: string;
+  fileName: string;
+}
 
 interface ProcessingState {
   phase: 'upload' | 'clipping' | 'complete';
@@ -12,6 +18,19 @@ interface ProcessingState {
   timeElapsed?: number;
   clipsGenerated?: number;
   totalClips?: number;
+  currentVideoIndex?: number;
+  totalVideos?: number;
+  currentVideoName?: string;
+}
+
+interface ProcessedVideo {
+  videoId: string;
+  clips: Clip[];
+  metrics: {
+    uploadTime: number;
+    clipTime: number;
+    totalTime: number;
+  };
 }
 
 export default function Processing() {
@@ -30,12 +49,39 @@ export default function Processing() {
     clipCount?: number;
   }>({});
   const [elapsedTime, setElapsedTime] = useState(0);
+  const [processedVideos, setProcessedVideos] = useState<ProcessedVideo[]>([]);
   const progressAnim = useRef(new Animated.Value(0)).current;
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const elapsedIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const videoQueueRef = useRef<VideoItem[]>([]);
+  const currentIndexRef = useRef(0);
 
   useEffect(() => {
-    processVideo();
+    // Parse video queue from params
+    const videosParam = params.videos as string;
+    const currentIndex = parseInt(params.currentIndex as string || '0', 10);
+    const totalVideos = parseInt(params.totalVideos as string || '1', 10);
+    
+    if (videosParam) {
+      try {
+        const videos = JSON.parse(videosParam) as VideoItem[];
+        videoQueueRef.current = videos;
+        currentIndexRef.current = currentIndex;
+        
+        if (videos.length > 0) {
+          setState(prev => ({
+            ...prev,
+            currentVideoIndex: currentIndex + 1,
+            totalVideos: videos.length,
+            currentVideoName: videos[currentIndex]?.fileName || 'video',
+          }));
+        }
+      } catch (e) {
+        console.error('[Processing] Failed to parse videos:', e);
+      }
+    }
+    
+    processVideoQueue();
     
     // Start elapsed time counter
     elapsedIntervalRef.current = setInterval(() => {
@@ -132,15 +178,75 @@ export default function Processing() {
     }, 400); // Update every 400ms for faster feel
   };
 
-  const processVideo = async () => {
+  const processVideoQueue = async () => {
+    const videos = videoQueueRef.current;
+    
+    if (videos.length === 0) {
+      // Fallback to single video mode for backward compatibility
+      const { uri, fileName } = params;
+      if (uri && typeof uri === 'string') {
+        await processSingleVideo({ uri, duration: params.duration as string || '0', fileName: fileName as string || 'video.mp4' }, true);
+      } else {
+        setError('No videos to process');
+      }
+      return;
+    }
+    
+    // Process all videos in queue sequentially
+    for (let i = 0; i < videos.length; i++) {
+      currentIndexRef.current = i;
+      const video = videos[i];
+      
+      setState(prev => ({
+        ...prev,
+        currentVideoIndex: i + 1,
+        totalVideos: videos.length,
+        currentVideoName: video.fileName,
+      }));
+      
+      try {
+        const isLastVideo = i === videos.length - 1;
+        await processSingleVideo(video, isLastVideo);
+      } catch (err) {
+        console.error(`[Processing] Error processing video ${i + 1}:`, err);
+        // Continue with next video even if one fails
+        if (i === videos.length - 1) {
+          // Last video failed, show error
+          if (err instanceof Error) {
+            setError(`Failed to process video ${i + 1}: ${err.message}`);
+          } else {
+            setError(`Failed to process video ${i + 1}`);
+          }
+          return;
+        }
+        // Continue to next video on error
+        continue;
+      }
+    }
+    
+    // All videos processed - navigate to results of last video
+    if (processedVideos.length > 0) {
+      const lastVideo = processedVideos[processedVideos.length - 1];
+      router.replace({
+        pathname: '/results',
+        params: {
+          videoId: lastVideo.videoId,
+          clips: JSON.stringify(lastVideo.clips),
+          metrics: JSON.stringify(lastVideo.metrics),
+        },
+      });
+    }
+  };
+
+  const processSingleVideo = async (video: VideoItem, isLastVideo: boolean = true) => {
     const totalStartTime = performance.now();
     setElapsedTime(0);
     
     try {
       console.log(`[Processing] ⏱️  START - ${new Date().toISOString()}`);
-      console.log('[Processing] Params:', JSON.stringify(params, null, 2));
+      console.log('[Processing] Video:', video.fileName);
       
-      const { uri, fileName } = params;
+      const { uri, fileName } = video;
       
       if (!uri || typeof uri !== 'string') {
         console.error('[Processing] Invalid URI:', uri);
@@ -203,35 +309,58 @@ export default function Processing() {
       }
       
       const totalTime = parseFloat(((performance.now() - totalStartTime) / 1000).toFixed(2));
-      setMetrics({
+      const videoMetrics = {
         uploadTime,
         clipTime: clipsTime,
         totalTime,
         clipCount: clips.length,
-      });
+      };
+      
+      setMetrics(videoMetrics);
+      
+      // Store processed video
+      const processedVideo: ProcessedVideo = {
+        videoId,
+        clips,
+        metrics: { uploadTime, clipTime: clipsTime, totalTime },
+      };
+      setProcessedVideos(prev => [...prev, processedVideo]);
+      
+      const hasMultipleVideos = videoQueueRef.current.length > 1;
       
       setState({
         phase: 'complete',
         progress: 100,
-        status: 'Complete!',
-        details: `${clips.length} clips generated`,
+        status: isLastVideo && hasMultipleVideos ? 'All videos complete!' : 'Video complete!',
+        details: `${clips.length} clips generated${hasMultipleVideos && !isLastVideo ? ` (${currentIndexRef.current + 1}/${videoQueueRef.current.length})` : ''}`,
         timeElapsed: totalTime,
         clipsGenerated: clips.length,
         totalClips: clips.length,
       });
       
-      // Small delay to show completion, then navigate
-      setTimeout(() => {
-        console.log(`[Processing] ✅ COMPLETE - Total processing time: ${totalTime}s`);
-        router.replace({
-          pathname: '/results',
-          params: {
-            videoId,
-            clips: JSON.stringify(clips),
-            metrics: JSON.stringify({ uploadTime, clipTime: clipsTime, totalTime }),
-          },
+      // If single video or last video, navigate to results after delay
+      if (videoQueueRef.current.length === 1 || isLastVideo) {
+        setTimeout(() => {
+          console.log(`[Processing] ✅ COMPLETE - Total processing time: ${totalTime}s`);
+          router.replace({
+            pathname: '/results',
+            params: {
+              videoId,
+              clips: JSON.stringify(clips),
+              metrics: JSON.stringify({ uploadTime, clipTime: clipsTime, totalTime }),
+            },
+          });
+        }, 800);
+      } else {
+        // Brief delay before continuing to next video (handled by loop in processVideoQueue)
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        setState({
+          phase: 'upload',
+          progress: 0,
+          status: 'Uploading next video...',
+          details: 'Preparing upload...',
         });
-      }, 800);
+      }
     } catch (err) {
       // Clear intervals on error
       if (intervalRef.current) {
@@ -264,7 +393,7 @@ export default function Processing() {
             onPress={() => {
               setError(null);
               setState({ phase: 'upload', progress: 0, status: 'Uploading video...' });
-              processVideo();
+              processVideoQueue();
             }}
           >
             <Text style={styles.retryButtonText}>Retry</Text>
@@ -280,6 +409,16 @@ export default function Processing() {
         <ActivityIndicator size="large" color="#007AFF" />
         
         <View style={styles.statusContainer}>
+          {state.currentVideoIndex && state.totalVideos && state.totalVideos > 1 && (
+            <Text style={styles.videoCounter}>
+              Video {state.currentVideoIndex} of {state.totalVideos}
+            </Text>
+          )}
+          {state.currentVideoName && (
+            <Text style={styles.videoName} numberOfLines={1}>
+              {state.currentVideoName}
+            </Text>
+          )}
           <Text style={styles.statusText}>{state.status}</Text>
           {state.details && (
             <Text style={styles.detailsText}>{state.details}</Text>
@@ -366,6 +505,21 @@ const styles = StyleSheet.create({
     marginTop: 30,
     alignItems: 'center',
     marginBottom: 30,
+  },
+  videoCounter: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#007AFF',
+    marginBottom: 8,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  videoName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#333',
+    marginBottom: 12,
+    maxWidth: '90%',
   },
   statusText: {
     fontSize: 22,

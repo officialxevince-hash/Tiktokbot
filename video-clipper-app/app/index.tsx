@@ -18,32 +18,49 @@ export default function VideoPicker() {
         return;
       }
 
-      // Pick video
+      // Pick videos (allow multiple)
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Videos,
         allowsEditing: false,
         quality: 1,
+        allowsMultipleSelection: true,
       });
 
-      if (result.canceled || !result.assets[0]) {
+      if (result.canceled || !result.assets || result.assets.length === 0) {
         return;
       }
 
-      const asset = result.assets[0];
-      
-      // Validate it's a video
-      if (!asset.mimeType?.startsWith('video/')) {
-        Alert.alert('Invalid File', 'Please select a video file.');
+      // Validate all selected files are videos
+      const validVideos = result.assets.filter(asset => 
+        asset.mimeType?.startsWith('video/')
+      );
+
+      if (validVideos.length === 0) {
+        Alert.alert('Invalid Files', 'Please select at least one video file.');
         return;
       }
 
-      // Navigate to processing screen with video info
+      if (validVideos.length < result.assets.length) {
+        Alert.alert(
+          'Some Files Skipped',
+          `${result.assets.length - validVideos.length} non-video file(s) were skipped.`
+        );
+      }
+
+      // Prepare video queue
+      const videoQueue = validVideos.map(asset => ({
+        uri: asset.uri,
+        duration: asset.duration?.toString() || '0',
+        fileName: asset.fileName || 'video.mp4',
+      }));
+
+      // Navigate to processing screen with video queue
       router.push({
         pathname: '/processing',
         params: {
-          uri: asset.uri,
-          duration: asset.duration?.toString() || '0',
-          fileName: asset.fileName || 'video.mp4',
+          videos: JSON.stringify(videoQueue),
+          currentIndex: '0',
+          totalVideos: videoQueue.length.toString(),
         },
       });
     } catch (error) {
@@ -61,7 +78,7 @@ export default function VideoPicker() {
         <Text style={styles.title}>Video Clipper</Text>
         <Text style={styles.subtitle}>
           Automatically split videos into short clips{'\n'}
-          <Text style={styles.subtitleHint}>Long press clips to select multiple</Text>
+          <Text style={styles.subtitleHint}>Select one or multiple videos to process</Text>
         </Text>
         
         <TouchableOpacity
@@ -71,16 +88,16 @@ export default function VideoPicker() {
           activeOpacity={0.8}
         >
           <Text style={styles.buttonText}>
-            {loading ? 'Loading...' : 'Select Video'}
+            {loading ? 'Loading...' : 'Select Video(s)'}
           </Text>
         </TouchableOpacity>
 
         <View style={styles.infoBox}>
           <Text style={styles.infoTitle}>How it works:</Text>
-          <Text style={styles.infoText}>• Select a video from your device</Text>
+          <Text style={styles.infoText}>• Select one or multiple videos</Text>
           <Text style={styles.infoText}>• Automatic clip generation (15s max)</Text>
           <Text style={styles.infoText}>• Preview and save clips</Text>
-          <Text style={styles.infoText}>• Batch operations supported</Text>
+          <Text style={styles.infoText}>• Batch processing supported</Text>
         </View>
       </View>
     </SafeAreaView>

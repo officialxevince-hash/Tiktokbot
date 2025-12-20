@@ -32,8 +32,11 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter("video_clipper_backend=debug,tower_http=debug")
         .init();
 
-    // Load configuration
-    let config = Config::from_env();
+    // Load configuration (from config.toml or env vars)
+    let config = Config::load().unwrap_or_else(|e| {
+        eprintln!("Warning: Failed to load config: {}. Using defaults.", e);
+        Config::default()
+    });
     
     // Ensure directories exist
     tokio::fs::create_dir_all(&config.upload_dir).await?;

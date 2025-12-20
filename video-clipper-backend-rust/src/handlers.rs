@@ -93,13 +93,29 @@ pub async fn upload_handler(
                 )
             })?;
 
-            // Stream chunks to file using chunk() method
+            // Stream chunks to file using buffered writes for better performance
             let mut chunk_count = 0;
+            let mut buffer = Vec::with_capacity(64 * 1024); // 64KB buffer
             
             loop {
                 let chunk = match field.chunk().await {
                     Ok(Some(chunk)) => chunk,
-                    Ok(None) => break, // End of stream
+                    Ok(None) => {
+                        // Flush remaining buffer before breaking
+                        if !buffer.is_empty() {
+                            file.write_all(&buffer).await.map_err(|e| {
+                                error!("[POST /upload] Failed to write final buffer: {}", e);
+                                (
+                                    StatusCode::INTERNAL_SERVER_ERROR,
+                                    Json(ErrorResponse {
+                                        error: format!("Failed to write file: {}", e),
+                                    }),
+                                )
+                            })?;
+                            buffer.clear();
+                        }
+                        break; // End of stream
+                    }
                     Err(e) => {
                         error!("[POST /upload] Failed to read chunk: {}", e);
                         return Err((
@@ -134,18 +150,25 @@ pub async fn upload_handler(
                     ));
                 }
 
-                file.write_all(&chunk).await.map_err(|e| {
-                    error!("[POST /upload] Failed to write chunk: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("Failed to write file: {}", e),
-                        }),
-                    )
-                })?;
+                // Buffer writes for better I/O performance
+                buffer.extend_from_slice(&chunk);
+                
+                // Flush buffer when it reaches configured size
+                if buffer.len() >= state.config.upload_buffer_size {
+                    file.write_all(&buffer).await.map_err(|e| {
+                        error!("[POST /upload] Failed to write chunk: {}", e);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: format!("Failed to write file: {}", e),
+                            }),
+                        )
+                    })?;
+                    buffer.clear();
+                }
                 
                 chunk_count += 1;
-                if chunk_count % 100 == 0 {
+                if chunk_count % state.config.upload_log_interval == 0 {
                     let data_size_mb = (total_bytes as f64 / 1024.0 / 1024.0) as f64;
                     info!(
                         "[POST /upload] Streaming... {} chunks, {:.2} MB",
@@ -378,7 +401,7 @@ async fn generate_time_based_clips(
     while start < duration {
         let clip_duration = (max_length).min(duration - start);
 
-        if clip_duration >= 3.0 || start + clip_duration >= duration {
+        if clip_duration >= config.optimization.min_clip_duration || start + clip_duration >= duration {
             segments.push((start, clip_duration, clip_index));
             clip_index += 1;
         }
@@ -400,8 +423,12 @@ async fn generate_time_based_clips(
     );
 
     // Process clips in parallel with semaphore for concurrency control
+    // Use adaptive concurrency based on system resources
     let semaphore = Arc::new(Semaphore::new(config.max_concurrent_clips));
     let mut handles = Vec::new();
+
+    // Pre-allocate handles vector for better performance
+    handles.reserve(segments.len());
 
     for (clip_start, clip_duration, index) in segments {
         let permit = semaphore.clone().acquire_owned().await?;
@@ -409,6 +436,7 @@ async fn generate_time_based_clips(
         let output_base = output_base.clone();
         let video_id = video_id.to_string();
 
+        let ffmpeg_config = config.ffmpeg.clone();
         let handle = tokio::spawn(async move {
             let _permit = permit; // Hold permit until clip is done
             let clip_id = format!("clip-{}", index);
@@ -430,7 +458,7 @@ async fn generate_time_based_clips(
                 clip_mem_before.rss_mb, clip_free_mem
             );
 
-            match ffmpeg::generate_clip(&input_path, &output_path, clip_start, clip_duration).await
+            match ffmpeg::generate_clip(&input_path, &output_path, clip_start, clip_duration, &ffmpeg_config).await
             {
                 Ok(()) => {
                     let clip_time = clip_start_time.elapsed().unwrap().as_secs_f64();
@@ -467,13 +495,20 @@ async fn generate_time_based_clips(
         handles.push((index, handle));
     }
 
-    // Collect results
-    let mut clips = Vec::new();
+    // Collect results - use try_join_all for better error handling
+    // Pre-allocate clips vector
+    let mut clips = Vec::with_capacity(handles.len());
+    
+    // Process handles in order but allow failures to not block others
     for (index, handle) in handles {
-        match handle.await? {
-            Ok(clip) => clips.push(clip),
-            Err(e) => {
+        match handle.await {
+            Ok(Ok(clip)) => clips.push(clip),
+            Ok(Err(e)) => {
                 error!("[generateClips] Failed to generate clip {}: {}", index, e);
+                // Continue with other clips
+            }
+            Err(e) => {
+                error!("[generateClips] Task for clip {} panicked: {}", index, e);
                 // Continue with other clips
             }
         }

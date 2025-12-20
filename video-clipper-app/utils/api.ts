@@ -7,6 +7,43 @@ export interface Clip {
   duration: number;
 }
 
+// Helper function to fetch with timeout
+const fetchWithTimeout = async (
+  url: string,
+  options: RequestInit,
+  timeoutMs: number = 600000 // 10 minutes default
+): Promise<Response> => {
+  const controller = new AbortController();
+  let timeoutId: NodeJS.Timeout | null = null;
+  
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`Request timeout after ${timeoutMs / 1000}s. The server may still be processing.`));
+    }, timeoutMs);
+  });
+  
+  try {
+    const response = await Promise.race([
+      fetch(url, { ...options, signal: controller.signal }),
+      timeoutPromise,
+    ]);
+    
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    return response;
+  } catch (error) {
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+    }
+    if (error instanceof Error && (error.message.includes('aborted') || error.message.includes('timeout'))) {
+      throw new Error(`Request timeout after ${timeoutMs / 1000}s. The server may still be processing.`);
+    }
+    throw error;
+  }
+};
+
 export async function uploadVideo(uri: string, fileName: string): Promise<string> {
   const startTime = performance.now();
   console.log(`[uploadVideo] ⏱️  START - ${new Date().toISOString()}`);
@@ -49,13 +86,18 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
     console.log('[uploadVideo] Upload URL:', uploadUrl);
     
     const uploadStart = performance.now();
-    console.log('[uploadVideo] Making fetch request...');
+    console.log('[uploadVideo] Making fetch request with 15 minute timeout...');
 
-    const response = await fetch(uploadUrl, {
-      method: 'POST',
-      body: formData,
-      // Don't set Content-Type header - let fetch set it with boundary
-    });
+    // Use fetchWithTimeout for uploads (large files can take a while)
+    const response = await fetchWithTimeout(
+      uploadUrl,
+      {
+        method: 'POST',
+        body: formData,
+        // Don't set Content-Type header - let fetch set it with boundary
+      },
+      900000 // 15 minutes timeout for uploads
+    );
 
     const uploadTime = ((performance.now() - uploadStart) / 1000).toFixed(3);
     console.log(`[uploadVideo] ✓ Upload completed in ${uploadTime}s`);
@@ -112,15 +154,20 @@ export async function generateClips(videoId: string, maxLength: number = 15): Pr
     console.log('[generateClips] Request body:', JSON.stringify(requestBody, null, 2));
     
     const requestStart = performance.now();
-    console.log('[generateClips] Making fetch request...');
+    console.log('[generateClips] Making fetch request with 10 minute timeout...');
 
-    const response = await fetch(clipUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    // Use fetchWithTimeout for clip generation (can take a while for large videos)
+    const response = await fetchWithTimeout(
+      clipUrl,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
       },
-      body: JSON.stringify(requestBody),
-    });
+      600000 // 10 minutes timeout for clip generation
+    );
 
     const requestTime = ((performance.now() - requestStart) / 1000).toFixed(3);
     console.log(`[generateClips] ✓ Request completed in ${requestTime}s`);
