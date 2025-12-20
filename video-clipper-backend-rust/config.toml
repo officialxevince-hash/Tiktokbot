@@ -1,0 +1,98 @@
+# Video Clipper Backend Configuration
+# This file contains all settings and optimizations for the backend
+# Environment variables will override these values if set
+
+[server]
+# Port to listen on
+port = 3000
+
+# Directories
+upload_dir = "uploads"
+output_dir = "clips"
+
+# Maximum file size in bytes (500MB default)
+max_file_size = 524288000
+
+[performance]
+# Maximum concurrent clip processing tasks
+# Set to 0 to auto-detect based on CPU count (recommended)
+# Auto-detection: CPU count - 1, min 2, max 8
+max_concurrent_clips = 0
+
+# Upload buffer size in bytes (64KB default for optimal I/O)
+upload_buffer_size = 65536
+
+# Chunk logging interval (log progress every N chunks)
+upload_log_interval = 100
+
+[ffmpeg]
+# Video encoding preset (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow)
+# veryfast is recommended: good balance of speed and quality
+preset = "veryfast"
+
+# Constant Rate Factor (CRF) - quality setting
+# Lower = better quality but larger files (18-28 range recommended)
+# 23 is a good balance
+crf = 23
+
+# Video codec profile (baseline, main, high)
+# baseline = fastest encoding, best compatibility
+profile = "baseline"
+
+# H.264 level (3.0, 3.1, 4.0, etc.)
+# 3.0 is good for most use cases
+level = "3.0"
+
+# Number of threads per clip encoding
+# Set to 0 to auto-detect (half of CPU count, max 4)
+# Auto-detection: CPU count / 2, min 1, max 4
+threads_per_clip = 0
+
+# Pixel format
+pixel_format = "yuv420p"
+
+# Tune settings (comma-separated: fastdecode, zerolatency, etc.)
+tune = ["fastdecode", "zerolatency"]
+
+# Audio codec (copy = no re-encoding, fastest)
+audio_codec = "copy"
+
+# Input seeking optimization
+# true = use input seeking (-ss before -i, faster but less accurate)
+# false = use output seeking (-ss after -i, slower but more accurate)
+use_input_seeking = true
+
+# Additional FFmpeg flags
+# Format: 
+#   "+flag" = movflag (e.g., "+faststart")
+#   "flag=value" = option with value (e.g., "avoid_negative_ts=make_zero")
+#   "fflags=+flag" = fflag (e.g., "fflags=+genpts")
+additional_flags = [
+    "+faststart",
+    "fflags=+genpts",
+    "avoid_negative_ts=make_zero"
+]
+
+[optimization]
+# Enable buffered file writes for uploads
+enable_buffered_uploads = true
+
+# Pre-allocate vectors for better memory performance
+preallocate_vectors = true
+
+# Minimum clip duration in seconds (clips shorter than this are skipped)
+min_clip_duration = 3.0
+
+# Logging verbosity (trace, debug, info, warn, error)
+log_level = "info"
+
+[limits]
+# Maximum number of videos to keep in memory
+max_cached_videos = 1000
+
+# Timeout for clip generation in seconds (0 = no timeout)
+clip_generation_timeout = 0
+
+# Timeout for video upload in seconds (0 = no timeout)
+upload_timeout = 0
+
