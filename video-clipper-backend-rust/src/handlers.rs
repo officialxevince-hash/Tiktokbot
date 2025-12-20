@@ -15,7 +15,6 @@ use std::{
     time::SystemTime,
 };
 use tokio::io::AsyncWriteExt;
-use futures::StreamExt;
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -94,13 +93,13 @@ pub async fn upload_handler(
                 )
             })?;
 
-            // Stream chunks to file - convert field to a stream
+            // Stream chunks to file using chunk() method
             let mut chunk_count = 0;
-            let mut stream = field;
             
-            while let Some(chunk_result) = stream.next().await {
-                let chunk = match chunk_result {
-                    Ok(chunk) => chunk,
+            loop {
+                let chunk = match field.chunk().await {
+                    Ok(Some(chunk)) => chunk,
+                    Ok(None) => break, // End of stream
                     Err(e) => {
                         error!("[POST /upload] Failed to read chunk: {}", e);
                         return Err((

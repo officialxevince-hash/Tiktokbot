@@ -28,7 +28,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 
 # Async utilities
-futures = { version = "0.3", features = ["stream"] }
+futures = "0.3"
 
 # Path handling
 pathdiff = "0.2"
