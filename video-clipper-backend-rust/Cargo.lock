@@ -1006,7 +1006,9 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bytes",
  "futures",
+ "http-body-util",
  "multer",
  "pathdiff",
  "serde",

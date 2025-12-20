@@ -33,3 +33,7 @@ futures = "0.3"
 # Path handling
 pathdiff = "0.2"
 
+# Body utilities
+http-body-util = "0.1"
+bytes = "1.5"
+

@@ -5,16 +5,19 @@ use crate::{
     system_info,
 };
 use axum::{
-    extract::{Multipart, State},
-    http::StatusCode,
+    body::Body,
+    extract::{Request, State},
+    http::{header::CONTENT_TYPE, StatusCode},
     response::Json,
 };
+use multer::Multipart;
+use http_body_util::BodyExt;
 use std::{
     path::PathBuf,
     sync::Arc,
     time::SystemTime,
 };
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::models::AppState;
@@ -22,27 +25,73 @@ use crate::models::AppState;
 /// Upload video file
 pub async fn upload_handler(
     State(state): State<Arc<AppState>>,
-    mut multipart: Multipart,
+    request: Request<Body>,
 ) -> Result<Json<UploadResponse>, (StatusCode, Json<ErrorResponse>)> {
     let start_time = SystemTime::now();
     let mem_before = system_info::get_memory_usage();
 
-    // Find the file field
-    let mut file_data: Option<(String, Vec<u8>)> = None;
-
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| {
-            error!("Multipart error: {}", e);
+    // Get content type
+    let content_type = request.headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
-                    error: format!("Upload error: {}", e),
+                    error: "Missing Content-Type header".to_string(),
+                }),
+            )
+        })?;
+
+    // Parse boundary from content type
+    let boundary = multer::parse_boundary(content_type).map_err(|e| {
+        error!("Failed to parse boundary: {}", e);
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Invalid multipart request: {}", e),
+            }),
+        )
+    })?;
+
+    // Convert body to bytes
+    let body_bytes = request.into_body()
+        .collect()
+        .await
+        .map_err(|e| {
+            error!("Failed to read request body: {}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("Failed to read request: {}", e),
                 }),
             )
         })?
-    {
+        .to_bytes();
+
+    // Create multipart parser
+    let mut multipart = Multipart::with_reader(
+        body_bytes.as_ref(),
+        boundary,
+        multer::Constraints::new()
+            .max_field_size(state.config.max_file_size)
+            .max_fields(10)
+            .max_field_name_size(100)
+            .max_file_size(state.config.max_file_size),
+    );
+
+    // Find the file field
+    let mut file_data: Option<(String, Vec<u8>)> = None;
+
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
+        error!("Multipart parsing error: {}", e);
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: format!("Error parsing multipart request: {}", e),
+            }),
+        )
+    })? {
         let name = field.name().unwrap_or("").to_string();
         if name == "file" {
             // Validate content type
@@ -58,37 +107,55 @@ pub async fn upload_handler(
             }
 
             let file_name = field.file_name().unwrap_or("video.mp4").to_string();
-            let data = field.bytes().await.map_err(|e| {
-                error!("Failed to read file: {}", e);
+            
+            // Read field data in chunks to handle large files
+            let mut data = Vec::new();
+            while let Some(chunk) = field.chunk().await.map_err(|e| {
+                error!("Failed to read file chunk: {}", e);
                 (
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: format!("Failed to read file: {}", e),
                     }),
                 )
-            })?;
-
-            // Check file size
-            if data.len() as u64 > state.config.max_file_size {
-                let file_size_mb = (data.len() as f64 / 1024.0 / 1024.0) as f64;
-                error!(
-                    "File too large: {:.2}MB (max: {}MB)",
-                    file_size_mb,
-                    state.config.max_file_size / 1024 / 1024
-                );
-                return Err((
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    Json(ErrorResponse {
-                        error: format!(
-                            "File too large: {:.2}MB. Maximum file size is {}MB.",
-                            file_size_mb,
-                            state.config.max_file_size / 1024 / 1024
-                        ),
-                    }),
-                ));
+            })? {
+                data.extend_from_slice(&chunk);
+                
+                // Check file size as we read
+                if data.len() as u64 > state.config.max_file_size {
+                    let file_size_mb = (data.len() as f64 / 1024.0 / 1024.0) as f64;
+                    error!(
+                        "File too large: {:.2}MB (max: {}MB)",
+                        file_size_mb,
+                        state.config.max_file_size / 1024 / 1024
+                    );
+                    return Err((
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "File too large: {:.2}MB. Maximum file size is {}MB.",
+                                file_size_mb,
+                                state.config.max_file_size / 1024 / 1024
+                            ),
+                        }),
+                    ));
+                }
             }
 
-            file_data = Some((file_name, data.to_vec()));
+            file_data = Some((file_name, data));
+        } else {
+            // Skip non-file fields
+            while field.next_chunk().await.map_err(|e| {
+                error!("Failed to skip field: {}", e);
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: format!("Failed to process request: {}", e),
+                    }),
+                )
+            })?.is_some() {
+                // Drain the field
+            }
         }
     }
 
