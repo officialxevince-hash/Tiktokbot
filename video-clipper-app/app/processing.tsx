@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { uploadVideo, generateClips } from '../utils/api';
 
@@ -123,7 +124,7 @@ export default function Processing() {
 
   if (error) {
     return (
-      <View style={styles.container}>
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
         <View style={styles.errorContainer}>
           <Text style={styles.errorIcon}>⚠️</Text>
           <Text style={styles.errorTitle}>Processing Error</Text>
@@ -139,12 +140,12 @@ export default function Processing() {
             <Text style={styles.retryButtonText}>Retry</Text>
           </TouchableOpacity>
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <View style={styles.content}>
         <ActivityIndicator size="large" color="#007AFF" />
         
@@ -192,7 +193,7 @@ export default function Processing() {
           <Text style={styles.hintText}>Analyzing and generating clips...</Text>
         )}
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 

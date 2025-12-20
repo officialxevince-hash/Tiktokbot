@@ -1,4 +1,5 @@
 import { View, StyleSheet, Text, TouchableOpacity } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { API_BASE_URL } from '../../utils/config';
@@ -6,6 +7,7 @@ import { API_BASE_URL } from '../../utils/config';
 export default function ClipPreview() {
   const params = useLocalSearchParams();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const url = params.url as string;
   const clipId = params.id as string;
   const videoUrl = `${API_BASE_URL}${url}`;
@@ -15,8 +17,8 @@ export default function ClipPreview() {
   });
 
   return (
-    <View style={styles.container}>
-      <View style={styles.header}>
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <View style={[styles.header, { paddingTop: Math.max(insets.top, 12) }]}>
         <TouchableOpacity
           style={styles.backButton}
           onPress={() => router.back()}
@@ -33,7 +35,7 @@ export default function ClipPreview() {
         nativeControls={true}
         allowsFullscreen={true}
       />
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -47,7 +49,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingTop: 50,
     paddingBottom: 12,
     backgroundColor: 'rgba(0,0,0,0.7)',
   },

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import { uploadVideo } from '../utils/api';
@@ -52,7 +53,7 @@ export default function VideoPicker() {
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
       <View style={styles.content}>
         <View style={styles.iconContainer}>
           <Text style={styles.icon}>✂️</Text>
@@ -82,7 +83,7 @@ export default function VideoPicker() {
           <Text style={styles.infoText}>• Batch operations supported</Text>
         </View>
       </View>
-    </View>
+    </SafeAreaView>
   );
 }
 
