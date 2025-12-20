@@ -77,8 +77,10 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
     const data = await response.json();
     const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
     console.log(`[uploadVideo] ✅ SUCCESS - Total time: ${totalTime}s`);
-    console.log('[uploadVideo] Video ID:', data.videoId);
-    return data.videoId;
+    // Backend returns snake_case: video_id
+    const videoId = data.video_id || data.videoId;
+    console.log('[uploadVideo] Video ID:', videoId);
+    return videoId;
   } catch (error) {
     const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
     console.error(`[uploadVideo] ❌ ERROR after ${totalTime}s:`, error);
@@ -102,9 +104,10 @@ export async function generateClips(videoId: string, maxLength: number = 15): Pr
     const clipUrl = `${API_BASE_URL}/clip`;
     console.log('[generateClips] Clip URL:', clipUrl);
     
+    // Backend expects snake_case: video_id and max_length
     const requestBody = {
-      videoId,
-      maxLength,
+      video_id: videoId,
+      max_length: maxLength,
     };
     console.log('[generateClips] Request body:', JSON.stringify(requestBody, null, 2));
     
