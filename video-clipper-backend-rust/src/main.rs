@@ -53,6 +53,12 @@ async fn main() -> anyhow::Result<()> {
     // This is required for Axum's Multipart extractor to handle large files
     let max_body_size = config.max_file_size;
     
+    // Note: Render.com has its own timeout limits at the load balancer level
+    // Free tier: 30s, Paid tiers: longer (up to 5 minutes)
+    // The timeout layer here helps with client-side timeouts, but Render's LB timeout
+    // will still apply. For very large files, consider chunked uploads or increasing
+    // Render service tier.
+    
     let app = Router::new()
         .route("/upload", post(upload_handler))
         .route("/clip", post(clip_handler))

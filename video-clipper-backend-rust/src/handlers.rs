@@ -14,6 +14,8 @@ use std::{
     sync::Arc,
     time::SystemTime,
 };
+use tokio::io::AsyncWriteExt;
+use futures::StreamExt;
 use tracing::{error, info};
 use uuid::Uuid;
 
@@ -27,12 +29,23 @@ pub async fn upload_handler(
     let start_time = SystemTime::now();
     let mem_before = system_info::get_memory_usage();
 
-    // Find the file field
-    let mut file_data: Option<(String, Vec<u8>)> = None;
+    // Generate unique video ID early
+    let video_id = format!(
+        "{}{}",
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        Uuid::new_v4().to_string().replace('-', "")
+    );
+
+    let mut file_name: Option<String> = None;
+    let mut file_path: Option<PathBuf> = None;
+    let mut total_bytes: u64 = 0;
 
     info!("[POST /upload] Starting multipart parsing...");
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
+    while let Some(mut field) = multipart.next_field().await.map_err(|e| {
         error!("[POST /upload] Multipart parsing error: {}", e);
         error!("[POST /upload] Error details: {:?}", e);
         (
@@ -48,6 +61,7 @@ pub async fn upload_handler(
         if name == "file" {
             // Validate content type
             if let Some(content_type) = field.content_type() {
+                info!("[POST /upload] Content-Type: {}", content_type);
                 if !content_type.starts_with("video/") {
                     return Err((
                         StatusCode::BAD_REQUEST,
@@ -58,44 +72,114 @@ pub async fn upload_handler(
                 }
             }
 
-            let file_name = field.file_name().unwrap_or("video.mp4").to_string();
+            let original_name = field.file_name().unwrap_or("video.mp4").to_string();
+            info!("[POST /upload] File name: {}", original_name);
             
-            // Read field data
-            let data = field.bytes().await.map_err(|e| {
-                error!("Failed to read file: {}", e);
+            // Create file path
+            let path = state.config.upload_dir.join(format!("{}-{}", video_id, original_name));
+            file_name = Some(original_name);
+            file_path = Some(path.clone());
+            
+            info!("[POST /upload] Streaming file to: {:?}", path);
+            let stream_start = SystemTime::now();
+            
+            // Stream file directly to disk instead of loading into memory
+            let mut file = tokio::fs::File::create(&path).await.map_err(|e| {
+                error!("[POST /upload] Failed to create file: {}", e);
                 (
-                    StatusCode::BAD_REQUEST,
+                    StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {
-                        error: format!("Failed to read file: {}", e),
+                        error: format!("Failed to create file: {}", e),
                     }),
                 )
             })?;
 
-            // Check file size
-            if data.len() as u64 > state.config.max_file_size {
-                let file_size_mb = (data.len() as f64 / 1024.0 / 1024.0) as f64;
-                error!(
-                    "File too large: {:.2}MB (max: {}MB)",
-                    file_size_mb,
-                    state.config.max_file_size / 1024 / 1024
-                );
-                return Err((
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    Json(ErrorResponse {
-                        error: format!(
-                            "File too large: {:.2}MB. Maximum file size is {}MB.",
-                            file_size_mb,
-                            state.config.max_file_size / 1024 / 1024
-                        ),
-                    }),
-                ));
+            // Stream chunks to file - convert field to a stream
+            let mut chunk_count = 0;
+            let mut stream = field;
+            
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(chunk) => chunk,
+                    Err(e) => {
+                        error!("[POST /upload] Failed to read chunk: {}", e);
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse {
+                                error: format!("Failed to read file: {}", e),
+                            }),
+                        ));
+                    }
+                };
+                
+                // Check total size as we stream
+                total_bytes += chunk.len() as u64;
+                if total_bytes > state.config.max_file_size {
+                    let file_size_mb = (total_bytes as f64 / 1024.0 / 1024.0) as f64;
+                    error!(
+                        "File too large: {:.2}MB (max: {}MB)",
+                        file_size_mb,
+                        state.config.max_file_size / 1024 / 1024
+                    );
+                    // Clean up partial file
+                    let _ = tokio::fs::remove_file(&path).await;
+                    return Err((
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        Json(ErrorResponse {
+                            error: format!(
+                                "File too large: {:.2}MB. Maximum file size is {}MB.",
+                                file_size_mb,
+                                state.config.max_file_size / 1024 / 1024
+                            ),
+                        }),
+                    ));
+                }
+
+                file.write_all(&chunk).await.map_err(|e| {
+                    error!("[POST /upload] Failed to write chunk: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("Failed to write file: {}", e),
+                        }),
+                    )
+                })?;
+                
+                chunk_count += 1;
+                if chunk_count % 100 == 0 {
+                    let data_size_mb = (total_bytes as f64 / 1024.0 / 1024.0) as f64;
+                    info!(
+                        "[POST /upload] Streaming... {} chunks, {:.2} MB",
+                        chunk_count, data_size_mb
+                    );
+                }
             }
 
-            file_data = Some((file_name, data.to_vec()));
+            file.sync_all().await.map_err(|e| {
+                error!("[POST /upload] Failed to sync file: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: format!("Failed to save file: {}", e),
+                    }),
+                )
+            })?;
+
+            let stream_time = stream_start.elapsed().unwrap().as_secs_f64();
+            let data_size_mb = (total_bytes as f64 / 1024.0 / 1024.0) as f64;
+            info!(
+                "[POST /upload] ✅ Streamed {} bytes ({:.2} MB) in {:.2}s ({} chunks)",
+                total_bytes,
+                data_size_mb,
+                stream_time,
+                chunk_count
+            );
         }
     }
 
-    let (original_name, file_bytes) = file_data.ok_or_else(|| {
+    info!("[POST /upload] ✅ Multipart parsing complete");
+
+    let original_name = file_name.ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -104,35 +188,9 @@ pub async fn upload_handler(
         )
     })?;
 
-    // Generate unique video ID
-    let video_id = format!(
-        "{}{}",
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        Uuid::new_v4().to_string().replace('-', "")
-    );
+    let file_path = file_path.unwrap();
 
-    // Save file
-    let file_path = state.config.upload_dir.join(format!("{}-{}", video_id, original_name));
-    tokio::fs::write(&file_path, file_bytes)
-        .await
-        .map_err(|e| {
-            error!("Failed to save file: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to save file: {}", e),
-                }),
-            )
-        })?;
-
-    let file_size = tokio::fs::metadata(&file_path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
-
+    let file_size = total_bytes;
     let file_size_mb = (file_size as f64 / 1024.0 / 1024.0) as f64;
 
     info!("[POST /upload] ⏱️  START - {:?}", SystemTime::now());
@@ -147,10 +205,12 @@ pub async fn upload_handler(
     );
 
     // Get video duration
+    info!("[POST /upload] Getting video duration...");
+    let duration_start = SystemTime::now();
     let duration = ffmpeg::get_video_duration(&file_path)
         .await
         .map_err(|e| {
-            error!("Failed to get video duration: {}", e);
+            error!("[POST /upload] Failed to get video duration: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
@@ -158,6 +218,9 @@ pub async fn upload_handler(
                 }),
             )
         })?;
+    
+    let duration_time = duration_start.elapsed().unwrap().as_secs_f64();
+    info!("[POST /upload] ✅ Video duration: {:.2}s (detected in {:.2}s)", duration, duration_time);
 
     // Store video metadata
     let video_metadata = VideoMetadata {
