@@ -33,6 +33,12 @@ EXPO_PUBLIC_API_URL=http://localhost:3000
 npx expo start
 ```
 
+**Note:** If you need to test on a physical device on a different network, use `--tunnel` mode:
+```bash
+npx expo start --tunnel
+```
+However, this requires ngrok to be installed. For local development (simulator/emulator or same network), regular mode is sufficient.
+
 ## Running the App
 
 - **iOS**: Press `i` in the terminal or scan QR code with Expo Go
@@ -60,4 +66,5 @@ utils/
 The app communicates with a Node.js backend for video processing. Make sure the backend is running before using the app.
 
 See `../video-clipper-backend/README.md` for backend setup instructions.
+
 

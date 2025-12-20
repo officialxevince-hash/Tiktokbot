@@ -15,23 +15,35 @@ export default function Processing() {
 
   const processVideo = async () => {
     try {
+      console.log('[Processing] Starting video processing...');
+      console.log('[Processing] Params:', JSON.stringify(params, null, 2));
+      
       const { uri, fileName } = params;
       
       if (!uri || typeof uri !== 'string') {
+        console.error('[Processing] Invalid URI:', uri);
         throw new Error('Invalid video URI');
       }
+
+      console.log('[Processing] Video URI:', uri);
+      console.log('[Processing] File name:', fileName);
 
       setStatus('Uploading video...');
       
       // Upload video
+      console.log('[Processing] Calling uploadVideo...');
       const videoId = await uploadVideo(uri, fileName as string);
+      console.log('[Processing] Upload successful, videoId:', videoId);
       
       setStatus('Analyzing video and generating clips...');
       
       // Generate clips (maxLength defaults to 15 in the function)
+      console.log('[Processing] Calling generateClips...');
       const clips = await generateClips(videoId, 15);
+      console.log('[Processing] Clips generated:', clips.length);
       
       // Navigate to results
+      console.log('[Processing] Navigating to results...');
       router.replace({
         pathname: '/results',
         params: {
@@ -40,7 +52,10 @@ export default function Processing() {
         },
       });
     } catch (err) {
-      console.error('Processing error:', err);
+      console.error('[Processing] Error in processVideo:', err);
+      console.error('[Processing] Error type:', err?.constructor?.name);
+      console.error('[Processing] Error message:', err?.message);
+      console.error('[Processing] Error stack:', err?.stack);
       setError(err instanceof Error ? err.message : 'Failed to process video');
     }
   };

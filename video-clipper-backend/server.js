@@ -77,6 +77,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
 // POST /clip - Generate clips from video
 app.post('/clip', async (req, res) => {
+  const startTime = Date.now();
   try {
     const { videoId, maxLength = 15 } = req.body;
 
@@ -85,11 +86,17 @@ app.post('/clip', async (req, res) => {
     }
 
     const video = videos.get(videoId);
+    console.log(`[POST /clip] Starting clip generation for video ${videoId} (${video.duration}s)`);
+    
     const clips = await generateClips(video.filePath, videoId, maxLength);
+    
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`[POST /clip] Generated ${clips.length} clips in ${elapsed}s`);
 
     res.json({ clips });
   } catch (error) {
-    console.error('Clipping error:', error);
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.error(`[POST /clip] Clipping error after ${elapsed}s:`, error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -104,31 +111,15 @@ function getVideoDuration(filePath) {
   });
 }
 
-// Helper: Generate clips using scene detection and silence detection
+// Helper: Generate clips using FAST time-based splitting (skip slow detection for MVP)
 async function generateClips(inputPath, videoId, maxLength) {
   try {
     const duration = await getVideoDuration(inputPath);
-    const sceneThreshold = 0.3;
-    const silenceThreshold = -30; // dB
-
-    // Detect scene changes
-    const sceneChanges = await detectSceneChanges(inputPath, sceneThreshold);
+    console.log(`[generateClips] Video duration: ${duration}s, using fast time-based splitting`);
     
-    // Detect silence
-    const silencePoints = await detectSilence(inputPath, silenceThreshold);
-    
-    // Combine and deduplicate points
-    const allPoints = [0, ...new Set([...sceneChanges, ...silencePoints])]
-      .filter(p => p > 0 && p < duration)
-      .sort((a, b) => a - b);
-    
-    // If no points detected, use time-based splitting
-    if (allPoints.length === 0 || (allPoints.length === 1 && allPoints[0] === 0)) {
-      return generateTimeBasedClips(inputPath, videoId, duration, maxLength);
-    }
-    
-    // Generate clips from detected points
-    return await generateClipsFromPoints(inputPath, videoId, allPoints, maxLength, duration);
+    // For MVP: Skip slow scene/silence detection, use fast time-based splitting
+    // This is much faster and good enough for MVP
+    return await generateTimeBasedClips(inputPath, videoId, duration, maxLength);
   } catch (error) {
     console.error('Error in generateClips:', error);
     // Fallback to time-based splitting
@@ -278,51 +269,87 @@ async function generateClipsFromPoints(inputPath, videoId, points, maxLength, du
   return clips;
 }
 
-// Helper: Generate time-based clips as fallback
+// Helper: Generate time-based clips - OPTIMIZED FOR SPEED
 async function generateTimeBasedClips(inputPath, videoId, duration, maxLength) {
   const clips = [];
   const outputBase = join(OUTPUT_DIR, videoId);
   await mkdir(outputBase, { recursive: true });
 
+  // Calculate all clip segments first
+  const segments = [];
   let start = 0;
   let clipIndex = 1;
 
   while (start < duration) {
     const clipDuration = Math.min(maxLength, duration - start);
     
-    if (clipDuration < 3 && start + clipDuration < duration) {
-      // Merge with next segment if too short
-      break;
+    if (clipDuration >= 3 || start + clipDuration >= duration) {
+      segments.push({ start, duration: clipDuration, index: clipIndex });
+      clipIndex++;
     }
-
-    const clipId = `clip-${clipIndex}`;
-    const outputPath = join(outputBase, `${clipId}.mp4`);
-
-    await new Promise((resolve, reject) => {
-      ffmpeg(inputPath)
-        .setStartTime(start)
-        .setDuration(clipDuration)
-        .output(outputPath)
-        .on('end', () => {
-          clips.push({
-            id: clipId,
-            url: `/clips/${videoId}/${clipId}.mp4`,
-            duration: clipDuration
-          });
-          resolve();
-        })
-        .on('error', reject)
-        .run();
-    });
-
     start += clipDuration;
-    clipIndex++;
   }
 
+  const totalClips = segments.length;
+  console.log(`[generateClips] Generating ${totalClips} clips in parallel...`);
+
+  // Process clips in parallel batches (3 at a time for speed)
+  const maxConcurrent = 3;
+  for (let i = 0; i < segments.length; i += maxConcurrent) {
+    const batch = segments.slice(i, i + maxConcurrent);
+    const batchPromises = batch.map(({ start: clipStart, duration: clipDuration, index }) => {
+      const clipId = `clip-${index}`;
+      const outputPath = join(outputBase, `${clipId}.mp4`);
+
+      return new Promise((resolve, reject) => {
+        console.log(`[generateClips] Processing clip ${index}/${totalClips} (${clipStart.toFixed(1)}s - ${(clipStart + clipDuration).toFixed(1)}s)`);
+        
+        ffmpeg(inputPath)
+          .setStartTime(clipStart)
+          .setDuration(clipDuration)
+          .outputOptions([
+            '-c:v', 'libx264',           // H.264 codec
+            '-preset', 'ultrafast',      // FASTEST encoding (lower quality but much faster)
+            '-crf', '23',                // Good quality balance
+            '-c:a', 'copy',              // Copy audio (no re-encoding = much faster!)
+            '-movflags', '+faststart',   // Optimize for streaming
+            '-threads', '0'              // Use all CPU cores
+          ])
+          .output(outputPath)
+          .on('end', () => {
+            console.log(`[generateClips] ✓ Clip ${index} completed`);
+            clips.push({
+              id: clipId,
+              url: `/clips/${videoId}/${clipId}.mp4`,
+              duration: clipDuration
+            });
+            resolve();
+          })
+          .on('error', (err) => {
+            console.error(`[generateClips] ✗ Error processing clip ${index}:`, err.message);
+            reject(err);
+          })
+          .run();
+      });
+    });
+
+    await Promise.all(batchPromises);
+  }
+
+  // Sort clips by index
+  clips.sort((a, b) => {
+    const aNum = parseInt(a.id.split('-')[1]);
+    const bNum = parseInt(b.id.split('-')[1]);
+    return aNum - bNum;
+  });
+
+  console.log(`[generateClips] ✓ All ${clips.length} clips generated successfully`);
   return clips;
 }
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running on http://0.0.0.0:${PORT}`);
+  console.log(`Server accessible at http://localhost:${PORT}`);
+  console.log(`Server accessible at http://192.168.40.29:${PORT}`);
 });
 
