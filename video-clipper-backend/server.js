@@ -103,7 +103,7 @@ const upload = multer({
       cb(new Error('Only video files are allowed'), false);
     }
   },
-  limits: { fileSize: 200 * 1024 * 1024 } // 200MB max to reduce memory usage
+  limits: { fileSize: 500 * 1024 * 1024 } // 500MB max (Render has 30GB memory, so we can handle larger files)
 });
 
 // Store video metadata
@@ -115,7 +115,15 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   const memBefore = process.memoryUsage();
   
   try {
-    if (!req.file) {
+    // Handle multer errors (file too large, etc.)
+    if (req.file === undefined) {
+      if (req.headers['content-length']) {
+        const fileSizeMB = (parseInt(req.headers['content-length']) / 1024 / 1024).toFixed(2);
+        console.error(`[POST /upload] ❌ File too large: ${fileSizeMB}MB (max: 500MB)`);
+        return res.status(413).json({ 
+          error: `File too large: ${fileSizeMB}MB. Maximum file size is 500MB.` 
+        });
+      }
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
@@ -156,6 +164,17 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     const uploadTime = ((Date.now() - startTime) / 1000).toFixed(2);
     console.error(`[POST /upload] ❌ ERROR after ${uploadTime}s:`, error.message);
     console.error(`[POST /upload] Stack:`, error.stack);
+    
+    // Handle specific multer errors
+    if (error.name === 'MulterError') {
+      if (error.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ 
+          error: 'File too large. Maximum file size is 500MB.' 
+        });
+      }
+      return res.status(400).json({ error: `Upload error: ${error.message}` });
+    }
+    
     res.status(500).json({ error: error.message });
   }
 });
