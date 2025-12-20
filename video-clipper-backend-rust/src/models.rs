@@ -28,6 +28,8 @@ pub struct ClipRequest {
 }
 
 fn default_max_length() -> f64 {
+    // This will be overridden by config when available
+    // The actual default comes from config.limits.default_max_clip_length
     15.0
 }
 
@@ -35,6 +37,7 @@ fn default_max_length() -> f64 {
 pub struct Clip {
     pub id: String,
     pub url: String,
+    pub thumbnail_url: String,
     pub duration: f64,
 }
 
@@ -51,5 +54,20 @@ pub struct ClipResponse {
 #[derive(Serialize)]
 pub struct ErrorResponse {
     pub error: String,
+}
+
+#[derive(Serialize)]
+pub struct ConfigResponse {
+    pub max_concurrent_clips: usize,
+    pub max_file_size: u64,
+    pub max_concurrent_videos: usize, // Calculated: safe number of videos to process concurrently
+    pub system_info: SystemInfoResponse,
+}
+
+#[derive(Serialize)]
+pub struct SystemInfoResponse {
+    pub cpus: usize,
+    pub memory_free_gb: f64,
+    pub memory_total_gb: f64,
 }
 

@@ -1,6 +1,6 @@
 use axum::{
     extract::DefaultBodyLimit,
-    routing::post,
+    routing::{get, post},
     Router,
 };
 use std::{
@@ -15,15 +15,28 @@ use tower_http::{
 };
 use tracing::info;
 
+mod cleanup;
 mod config;
 mod ffmpeg;
 mod handlers;
 mod models;
 mod system_info;
 
+use cleanup::start_cleanup_task;
 use config::Config;
-use handlers::{clip_handler, upload_handler};
+use handlers::{clip_handler, config_handler, upload_handler};
 use models::AppState;
+
+/// Get local IP address for network access
+fn get_local_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    
+    // Try to connect to a remote address to determine local IP
+    // This doesn't actually send data, just determines the local interface
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    socket.local_addr().ok()?.ip().to_string().into()
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -63,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
     // Render service tier.
     
     let app = Router::new()
+        .route("/config", get(config_handler))
         .route("/upload", post(upload_handler))
         .route("/clip", post(clip_handler))
         .nest_service("/clips", ServeDir::new(&config.output_dir))
@@ -75,13 +89,27 @@ async fn main() -> anyhow::Result<()> {
     let addr = format!("0.0.0.0:{}", config.port);
     info!("🚀 Server starting on {}", addr);
     
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = tokio::net::TcpListener::bind(&addr).await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                anyhow::anyhow!(
+                    "Port {} is already in use. Try:\n  - Kill the process: lsof -ti:{} | xargs kill -9\n  - Use a different port: PORT=3001 cargo run",
+                    config.port, config.port
+                )
+            } else {
+                anyhow::Error::from(e)
+            }
+        })?;
+    
+    // Get local IP address for network access
+    let local_ip = get_local_ip().unwrap_or_else(|| "localhost".to_string());
     
     // Log network interfaces and system info
     let sys_info = system_info::get_system_info();
     println!("{}", "=".repeat(60));
     println!("✅ Server running on http://0.0.0.0:{}", config.port);
     println!("✅ Server accessible at http://localhost:{}", config.port);
+    println!("🌐 Network URL: http://{}:{}", local_ip, config.port);
     println!("{}", "=".repeat(60));
     println!("📊 Runtime Environment:");
     println!("   Rust: {}", sys_info.rust_version);
@@ -96,6 +124,14 @@ async fn main() -> anyhow::Result<()> {
     println!("   Output Dir: {:?}", config.output_dir);
     println!("   Max Concurrent Clips: {}", config.max_concurrent_clips);
     println!("{}", "=".repeat(60));
+    
+    // Start background cleanup task
+    let _cleanup_handle = start_cleanup_task(Arc::new(config.clone()));
+    info!(
+        "🧹 Started periodic cleanup task ({}s interval, {}s max age)",
+        config.limits.cleanup_interval_seconds,
+        config.limits.cleanup_max_age_seconds
+    );
     
     info!("✅ Server listening on {}", addr);
     

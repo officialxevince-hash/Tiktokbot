@@ -1,5 +1,6 @@
 import { View, StyleSheet, Text, TouchableOpacity } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { API_BASE_URL } from '../../utils/config';
@@ -17,25 +18,28 @@ export default function ClipPreview() {
   });
 
   return (
-    <SafeAreaView style={styles.container} edges={['top']}>
-      <View style={[styles.header, { paddingTop: Math.max(insets.top, 12) }]}>
-        <TouchableOpacity
-          style={styles.backButton}
-          onPress={() => router.back()}
-        >
-          <Text style={styles.backButtonText}>← Back</Text>
-        </TouchableOpacity>
-        <Text style={styles.headerTitle}>{clipId}</Text>
-        <View style={styles.headerSpacer} />
-      </View>
-      <VideoView
-        player={player}
-        style={styles.video}
-        contentFit="contain"
-        nativeControls={true}
-        allowsFullscreen={true}
-      />
-    </SafeAreaView>
+    <>
+      <StatusBar style="light" />
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <View style={[styles.header, { paddingTop: insets.top }]}>
+          <TouchableOpacity
+            style={styles.backButton}
+            onPress={() => router.back()}
+          >
+            <Text style={styles.backButtonText}>← Back</Text>
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>{clipId}</Text>
+          <View style={styles.headerSpacer} />
+        </View>
+        <VideoView
+          player={player}
+          style={styles.video}
+          contentFit="contain"
+          nativeControls={true}
+          fullscreenOptions={{ enable: true }}
+        />
+      </SafeAreaView>
+    </>
   );
 }
 

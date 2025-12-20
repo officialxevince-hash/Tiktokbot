@@ -1,8 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity, Animated } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity, Animated, ScrollView, AppState, AppStateStatus } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { uploadVideo, generateClips, Clip } from '../utils/api';
+import { uploadVideo, generateClips, getConfig, Clip, BackendConfig } from '../utils/api';
+import { APP_CONFIG } from '../utils/config';
 
 interface VideoItem {
   uri: string;
@@ -10,17 +12,24 @@ interface VideoItem {
   fileName: string;
 }
 
-interface ProcessingState {
-  phase: 'upload' | 'clipping' | 'complete';
+type VideoStatus = 'queued' | 'uploading' | 'clipping' | 'complete' | 'error';
+
+interface VideoQueueItem {
+  video: VideoItem;
+  index: number;
+  status: VideoStatus;
   progress: number;
-  status: string;
+  videoId?: string;
+  clips?: Clip[];
+  metrics?: {
+    uploadTime: number;
+    clipTime: number;
+    totalTime: number;
+  };
+  error?: string;
   details?: string;
-  timeElapsed?: number;
   clipsGenerated?: number;
   totalClips?: number;
-  currentVideoIndex?: number;
-  totalVideos?: number;
-  currentVideoName?: string;
 }
 
 interface ProcessedVideo {
@@ -33,77 +42,198 @@ interface ProcessedVideo {
   };
 }
 
+// Maximum concurrent video processing - will be set from backend config
+let MAX_CONCURRENT_VIDEOS = 2; // Default fallback
+
 export default function Processing() {
   const params = useLocalSearchParams();
   const router = useRouter();
-  const [state, setState] = useState<ProcessingState>({
-    phase: 'upload',
-    progress: 0,
-    status: 'Uploading video...',
-  });
+  const [videoQueue, setVideoQueue] = useState<VideoQueueItem[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [metrics, setMetrics] = useState<{
-    uploadTime?: number;
-    clipTime?: number;
-    totalTime?: number;
-    clipCount?: number;
-  }>({});
   const [elapsedTime, setElapsedTime] = useState(0);
   const [processedVideos, setProcessedVideos] = useState<ProcessedVideo[]>([]);
-  const progressAnim = useRef(new Animated.Value(0)).current;
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const [backendConfig, setBackendConfig] = useState<BackendConfig | null>(null);
+  const progressAnimsRef = useRef<Map<number, Animated.Value>>(new Map());
+  const intervalRefsRef = useRef<Map<number, NodeJS.Timeout>>(new Map());
   const elapsedIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const videoQueueRef = useRef<VideoItem[]>([]);
-  const currentIndexRef = useRef(0);
+  const processingRef = useRef<Set<number>>(new Set()); // Track which videos are currently processing
+  const queueRef = useRef<VideoQueueItem[]>([]); // Keep ref of latest queue for processing logic
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const backgroundKeepAliveRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
+    // Fetch backend configuration first
+    const fetchConfig = async () => {
+      try {
+        console.log('[Processing] Fetching backend configuration...');
+        const config = await getConfig();
+        setBackendConfig(config);
+        // Update the global MAX_CONCURRENT_VIDEOS from backend
+        MAX_CONCURRENT_VIDEOS = config.max_concurrent_videos;
+        console.log('[Processing] Backend config loaded:', {
+          max_concurrent_videos: config.max_concurrent_videos,
+          max_concurrent_clips: config.max_concurrent_clips,
+          cpus: config.system_info.cpus,
+        });
+      } catch (err) {
+        console.error('[Processing] Failed to fetch backend config:', err);
+        // Continue with default value
+        console.warn('[Processing] Using default MAX_CONCURRENT_VIDEOS:', MAX_CONCURRENT_VIDEOS);
+      }
+    };
+
+    fetchConfig();
+
     // Parse video queue from params
     const videosParam = params.videos as string;
-    const currentIndex = parseInt(params.currentIndex as string || '0', 10);
-    const totalVideos = parseInt(params.totalVideos as string || '1', 10);
     
     if (videosParam) {
       try {
         const videos = JSON.parse(videosParam) as VideoItem[];
-        videoQueueRef.current = videos;
-        currentIndexRef.current = currentIndex;
+        const queueItems: VideoQueueItem[] = videos.map((video, index) => ({
+          video,
+          index,
+          status: 'queued' as VideoStatus,
+          progress: 0,
+        }));
+        setVideoQueue(queueItems);
+        queueRef.current = queueItems; // Update ref
         
-        if (videos.length > 0) {
-          setState(prev => ({
-            ...prev,
-            currentVideoIndex: currentIndex + 1,
-            totalVideos: videos.length,
-            currentVideoName: videos[currentIndex]?.fileName || 'video',
-          }));
-        }
+        // Initialize progress animations for each video
+        queueItems.forEach((item) => {
+          progressAnimsRef.current.set(item.index, new Animated.Value(0));
+        });
       } catch (e) {
         console.error('[Processing] Failed to parse videos:', e);
+        setError('Failed to parse video queue');
+      }
+    } else {
+      // Fallback to single video mode
+      const { uri, fileName } = params;
+      if (uri && typeof uri === 'string') {
+        const queueItems: VideoQueueItem[] = [{
+          video: { uri, duration: params.duration as string || '0', fileName: fileName as string || 'video.mp4' },
+          index: 0,
+          status: 'queued' as VideoStatus,
+          progress: 0,
+        }];
+        setVideoQueue(queueItems);
+        queueRef.current = queueItems; // Update ref
+        progressAnimsRef.current.set(0, new Animated.Value(0));
+      } else {
+        setError('No videos to process');
       }
     }
-    
-    processVideoQueue();
     
     // Start elapsed time counter
     elapsedIntervalRef.current = setInterval(() => {
       setElapsedTime(prev => prev + 0.1);
-    }, 100);
-    
+    }, APP_CONFIG.processing.progressUpdateInterval);
+
+    // Handle app state changes to prevent cleanup during processing
+    const appStateSubscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+      console.log('[Processing] App state changed:', appStateRef.current, '->', nextAppState);
+      
+      if (
+        appStateRef.current.match(/inactive|background/) &&
+        nextAppState === 'active'
+      ) {
+        console.log('[Processing] App returned to foreground - resuming processing');
+        // Resume processing if there are queued items
+        const hasQueued = queueRef.current.some(item => 
+          item.status === 'queued' && !processingRef.current.has(item.index)
+        );
+        const hasSlots = processingRef.current.size < MAX_CONCURRENT_VIDEOS;
+        
+        if (hasQueued && hasSlots) {
+          processVideoQueue();
+        }
+      } else if (
+        appStateRef.current === 'active' &&
+        nextAppState.match(/inactive|background/)
+      ) {
+        console.log('[Processing] App going to background - keeping processing alive');
+        // Keep processing alive in background
+        if (backgroundKeepAliveRef.current) {
+          clearInterval(backgroundKeepAliveRef.current);
+        }
+        
+        backgroundKeepAliveRef.current = setInterval(() => {
+          // Ensure processing continues
+          if (processingRef.current.size > 0) {
+            console.log('[Processing] Background: Active processing ongoing');
+          }
+        }, 30000);
+      }
+
+      appStateRef.current = nextAppState;
+    });
+
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      intervalRefsRef.current.forEach(interval => clearInterval(interval));
       if (elapsedIntervalRef.current) clearInterval(elapsedIntervalRef.current);
+      if (backgroundKeepAliveRef.current) clearInterval(backgroundKeepAliveRef.current);
+      appStateSubscription.remove();
     };
   }, []);
 
-  // Animate progress bar smoothly
+  // Start processing videos when queue is ready or when videos complete
   useEffect(() => {
-    Animated.timing(progressAnim, {
-      toValue: state.progress,
-      duration: 300,
-      useNativeDriver: false,
-    }).start();
-  }, [state.progress]);
+    // Wait for config to be loaded before processing
+    if (videoQueue.length > 0 && backendConfig) {
+      // Check if there are queued videos that aren't being processed
+      const hasQueued = videoQueue.some(item => 
+        item.status === 'queued' && !processingRef.current.has(item.index)
+      );
+      const hasSlots = processingRef.current.size < MAX_CONCURRENT_VIDEOS;
+      
+      if (hasQueued && hasSlots) {
+        processVideoQueue();
+      }
+    }
+  }, [videoQueue.map(v => `${v.index}-${v.status}`).join(','), backendConfig]);
 
-  const simulateUploadProgress = () => {
+  // Animate progress bars smoothly
+  useEffect(() => {
+    videoQueue.forEach((item) => {
+      const anim = progressAnimsRef.current.get(item.index);
+      if (anim) {
+        Animated.timing(anim, {
+          toValue: item.progress,
+          duration: 300,
+          useNativeDriver: false,
+        }).start();
+      }
+    });
+  }, [videoQueue.map(v => v.progress).join(',')]);
+
+  const updateVideoStatus = (index: number, updates: Partial<VideoQueueItem>) => {
+    setVideoQueue(prev => {
+      const updated = prev.map(item => 
+        item.index === index ? { ...item, ...updates } : item
+      );
+      queueRef.current = updated; // Update ref
+      
+      // If a video just completed, trigger processing of next video
+      if (updates.status === 'complete' || updates.status === 'error') {
+        // Use setTimeout to ensure state is updated before checking
+        setTimeout(() => {
+          const hasQueued = queueRef.current.some(item => 
+            item.status === 'queued' && !processingRef.current.has(item.index)
+          );
+          const hasSlots = processingRef.current.size < MAX_CONCURRENT_VIDEOS;
+          
+          if (hasQueued && hasSlots) {
+            processVideoQueue();
+          }
+        }, 100);
+      }
+      
+      return updated;
+    });
+  };
+
+  const simulateUploadProgress = (index: number) => {
     let currentProgress = 0;
     const statusMessages = [
       'Preparing video...',
@@ -113,14 +243,12 @@ export default function Processing() {
     ];
     let messageIndex = 0;
     
-    intervalRef.current = setInterval(() => {
+    const interval = setInterval(() => {
       currentProgress += Math.random() * 2.5 + 1.5; // 1.5-4% per update
       if (currentProgress >= 45) {
         currentProgress = 45; // Cap at 45% during upload
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
-        }
+        clearInterval(interval);
+        intervalRefsRef.current.delete(index);
       }
       
       // Update status message based on progress
@@ -129,15 +257,16 @@ export default function Processing() {
         messageIndex = newMessageIndex;
       }
       
-      setState(prev => ({
-        ...prev,
+      updateVideoStatus(index, {
         progress: Math.min(currentProgress, 45),
         details: statusMessages[messageIndex],
-      }));
-    }, 150); // Update every 150ms for faster feel
+      });
+    }, APP_CONFIG.processing.uploadProgressInterval);
+    
+    intervalRefsRef.current.set(index, interval);
   };
 
-  const simulateClipProgress = (totalClips: number) => {
+  const simulateClipProgress = (index: number, totalClips: number) => {
     let currentProgress = 50;
     let clipsGenerated = 0;
     const statusMessages = [
@@ -149,7 +278,7 @@ export default function Processing() {
     ];
     let messageIndex = 0;
     
-    intervalRef.current = setInterval(() => {
+    const interval = setInterval(() => {
       clipsGenerated += 1;
       currentProgress = 50 + (clipsGenerated / totalClips) * 45; // 50% to 95%
       
@@ -160,230 +289,287 @@ export default function Processing() {
       
       if (clipsGenerated >= totalClips) {
         currentProgress = 95;
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
-        }
+        clearInterval(interval);
+        intervalRefsRef.current.delete(index);
       }
       
-      setState(prev => ({
-        ...prev,
+      updateVideoStatus(index, {
         progress: Math.min(currentProgress, 95),
         clipsGenerated,
         totalClips,
         details: clipsGenerated < totalClips 
           ? `${statusMessages[messageIndex]} (${clipsGenerated}/${totalClips})`
           : 'Finalizing clips...',
-      }));
-    }, 400); // Update every 400ms for faster feel
-  };
-
-  const processVideoQueue = async () => {
-    const videos = videoQueueRef.current;
-    
-    if (videos.length === 0) {
-      // Fallback to single video mode for backward compatibility
-      const { uri, fileName } = params;
-      if (uri && typeof uri === 'string') {
-        await processSingleVideo({ uri, duration: params.duration as string || '0', fileName: fileName as string || 'video.mp4' }, true);
-      } else {
-        setError('No videos to process');
-      }
-      return;
-    }
-    
-    // Process all videos in queue sequentially
-    for (let i = 0; i < videos.length; i++) {
-      currentIndexRef.current = i;
-      const video = videos[i];
-      
-      setState(prev => ({
-        ...prev,
-        currentVideoIndex: i + 1,
-        totalVideos: videos.length,
-        currentVideoName: video.fileName,
-      }));
-      
-      try {
-        const isLastVideo = i === videos.length - 1;
-        await processSingleVideo(video, isLastVideo);
-      } catch (err) {
-        console.error(`[Processing] Error processing video ${i + 1}:`, err);
-        // Continue with next video even if one fails
-        if (i === videos.length - 1) {
-          // Last video failed, show error
-          if (err instanceof Error) {
-            setError(`Failed to process video ${i + 1}: ${err.message}`);
-          } else {
-            setError(`Failed to process video ${i + 1}`);
-          }
-          return;
-        }
-        // Continue to next video on error
-        continue;
-      }
-    }
-    
-    // All videos processed - navigate to results of last video
-    if (processedVideos.length > 0) {
-      const lastVideo = processedVideos[processedVideos.length - 1];
-      router.replace({
-        pathname: '/results',
-        params: {
-          videoId: lastVideo.videoId,
-          clips: JSON.stringify(lastVideo.clips),
-          metrics: JSON.stringify(lastVideo.metrics),
-        },
       });
+    }, APP_CONFIG.processing.clipProgressInterval);
+    
+    intervalRefsRef.current.set(index, interval);
+  };
+
+  const processVideoQueue = () => {
+    const currentQueue = queueRef.current;
+    if (currentQueue.length === 0) return;
+
+    // Process videos with controlled concurrency
+    const processNext = () => {
+      const latestQueue = queueRef.current;
+      
+      // Find next queued video that's not being processed
+      const nextVideo = latestQueue.find(
+        item => item.status === 'queued' && !processingRef.current.has(item.index)
+      );
+      
+      if (!nextVideo) {
+        // Check if all videos are done
+        const allComplete = latestQueue.every(item => 
+          item.status === 'complete' || item.status === 'error'
+        );
+        
+        if (allComplete) {
+          setProcessedVideos(prevVideos => {
+            if (prevVideos.length > 0) {
+              // Navigate to results of last video
+              const lastVideo = prevVideos[prevVideos.length - 1];
+              setTimeout(() => {
+                router.replace({
+                  pathname: '/results',
+                  params: {
+                    videoId: lastVideo.videoId,
+                    clips: JSON.stringify(lastVideo.clips),
+                    metrics: JSON.stringify(lastVideo.metrics),
+                  },
+                });
+              }, 1000);
+            }
+            return prevVideos;
+          });
+        }
+        return;
+      }
+
+      // Mark as processing
+      processingRef.current.add(nextVideo.index);
+      updateVideoStatus(nextVideo.index, { status: 'uploading' });
+
+      // Process video (don't await - allows concurrent processing)
+      processSingleVideo(nextVideo.index).finally(() => {
+        processingRef.current.delete(nextVideo.index);
+        // Process next video after a brief delay
+        setTimeout(processNext, 100);
+      });
+    };
+
+    // Start processing up to MAX_CONCURRENT_VIDEOS videos
+    const queuedCount = currentQueue.filter(item => item.status === 'queued').length;
+    const activeCount = processingRef.current.size;
+    const slotsAvailable = MAX_CONCURRENT_VIDEOS - activeCount;
+    
+    for (let i = 0; i < Math.min(slotsAvailable, queuedCount); i++) {
+      processNext();
     }
   };
 
-  const processSingleVideo = async (video: VideoItem, isLastVideo: boolean = true) => {
+  const processSingleVideo = async (index: number) => {
+    const queueItem = queueRef.current.find(item => item.index === index);
+    if (!queueItem) return;
+
     const totalStartTime = performance.now();
-    setElapsedTime(0);
+    const { video } = queueItem;
     
     try {
-      console.log(`[Processing] ⏱️  START - ${new Date().toISOString()}`);
+      console.log(`[Processing] ⏱️  START Video ${index + 1} - ${new Date().toISOString()}`);
       console.log('[Processing] Video:', video.fileName);
       
       const { uri, fileName } = video;
       
       if (!uri || typeof uri !== 'string') {
-        console.error('[Processing] Invalid URI:', uri);
         throw new Error('Invalid video URI');
       }
 
-      console.log('[Processing] Video URI:', uri);
-      console.log('[Processing] File name:', fileName);
-
-      // Upload phase with simulated progress
-      setState({
-        phase: 'upload',
+      // Upload phase
+      updateVideoStatus(index, {
+        status: 'uploading',
         progress: 0,
-        status: 'Uploading video...',
         details: 'Preparing upload...',
       });
       
-      simulateUploadProgress();
+      simulateUploadProgress(index);
       
       const uploadStart = performance.now();
-      console.log('[Processing] Calling uploadVideo...');
-      const videoId = await uploadVideo(uri, fileName as string);
+      const videoId = await uploadVideo(uri, fileName);
       const uploadTime = parseFloat(((performance.now() - uploadStart) / 1000).toFixed(2));
       console.log(`[Processing] ✓ Upload completed in ${uploadTime}s`);
-      console.log('[Processing] Video ID:', videoId);
       
       // Clear upload interval
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
+      const uploadInterval = intervalRefsRef.current.get(index);
+      if (uploadInterval) {
+        clearInterval(uploadInterval);
+        intervalRefsRef.current.delete(index);
       }
       
-      setMetrics(prev => ({ ...prev, uploadTime }));
-      setState({
-        phase: 'clipping',
+      // Clipping phase
+      updateVideoStatus(index, {
+        status: 'clipping',
         progress: 50,
-        status: 'Generating clips...',
         details: 'Analyzing video...',
-        timeElapsed: uploadTime,
+        videoId,
       });
       
-      // Clipping phase with simulated progress
       const clipsStart = performance.now();
-      console.log('[Processing] Calling generateClips...');
       
-      // Estimate clip count based on video duration (if available)
-      const duration = params.duration ? parseFloat(params.duration as string) : 180;
+      // Estimate clip count
+      const duration = parseFloat(video.duration) || 180;
       const estimatedClips = Math.ceil(duration / 15);
-      simulateClipProgress(estimatedClips);
+      simulateClipProgress(index, estimatedClips);
       
       const clips = await generateClips(videoId, 15);
       const clipsTime = parseFloat(((performance.now() - clipsStart) / 1000).toFixed(2));
       console.log(`[Processing] ✓ Clips generated in ${clipsTime}s`);
-      console.log('[Processing] Total clips:', clips.length);
       
       // Clear clip interval
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
+      const clipInterval = intervalRefsRef.current.get(index);
+      if (clipInterval) {
+        clearInterval(clipInterval);
+        intervalRefsRef.current.delete(index);
       }
       
       const totalTime = parseFloat(((performance.now() - totalStartTime) / 1000).toFixed(2));
-      const videoMetrics = {
-        uploadTime,
-        clipTime: clipsTime,
-        totalTime,
-        clipCount: clips.length,
-      };
+      const metrics = { uploadTime, clipTime: clipsTime, totalTime };
       
-      setMetrics(videoMetrics);
+      // Mark as complete
+      updateVideoStatus(index, {
+        status: 'complete',
+        progress: 100,
+        clips,
+        metrics,
+        details: `${clips.length} clips generated`,
+        clipsGenerated: clips.length,
+        totalClips: clips.length,
+      });
       
       // Store processed video
       const processedVideo: ProcessedVideo = {
         videoId,
         clips,
-        metrics: { uploadTime, clipTime: clipsTime, totalTime },
+        metrics,
       };
       setProcessedVideos(prev => [...prev, processedVideo]);
       
-      const hasMultipleVideos = videoQueueRef.current.length > 1;
-      
-      setState({
-        phase: 'complete',
-        progress: 100,
-        status: isLastVideo && hasMultipleVideos ? 'All videos complete!' : 'Video complete!',
-        details: `${clips.length} clips generated${hasMultipleVideos && !isLastVideo ? ` (${currentIndexRef.current + 1}/${videoQueueRef.current.length})` : ''}`,
-        timeElapsed: totalTime,
-        clipsGenerated: clips.length,
-        totalClips: clips.length,
-      });
-      
-      // If single video or last video, navigate to results after delay
-      if (videoQueueRef.current.length === 1 || isLastVideo) {
-        setTimeout(() => {
-          console.log(`[Processing] ✅ COMPLETE - Total processing time: ${totalTime}s`);
-          router.replace({
-            pathname: '/results',
-            params: {
-              videoId,
-              clips: JSON.stringify(clips),
-              metrics: JSON.stringify({ uploadTime, clipTime: clipsTime, totalTime }),
-            },
-          });
-        }, 800);
-      } else {
-        // Brief delay before continuing to next video (handled by loop in processVideoQueue)
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        setState({
-          phase: 'upload',
-          progress: 0,
-          status: 'Uploading next video...',
-          details: 'Preparing upload...',
-        });
-      }
     } catch (err) {
       // Clear intervals on error
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
+      const interval = intervalRefsRef.current.get(index);
+      if (interval) {
+        clearInterval(interval);
+        intervalRefsRef.current.delete(index);
       }
       
-      const totalTime = ((performance.now() - totalStartTime) / 1000).toFixed(3);
-      console.error(`[Processing] ❌ ERROR after ${totalTime}s:`, err);
-      console.error('[Processing] Error type:', err?.constructor?.name);
-      if (err instanceof Error) {
-        console.error('[Processing] Error message:', err.message);
-        console.error('[Processing] Error stack:', err.stack);
-        setError(err.message);
-      } else {
-        setError('Failed to process video');
-      }
+      const errorMessage = err instanceof Error ? err.message : 'Failed to process video';
+      console.error(`[Processing] ❌ ERROR Video ${index + 1}:`, errorMessage);
+      
+      updateVideoStatus(index, {
+        status: 'error',
+        error: errorMessage,
+        details: 'Processing failed',
+      });
     }
   };
 
-  if (error) {
+  const renderVideoItem = (item: VideoQueueItem) => {
+    const progressAnim = progressAnimsRef.current.get(item.index) || new Animated.Value(0);
+    const statusColors = {
+      queued: '#999',
+      uploading: '#007AFF',
+      clipping: '#FF9500',
+      complete: '#34C759',
+      error: '#FF3B30',
+    };
+    const statusIcons = {
+      queued: '⏳',
+      uploading: '📤',
+      clipping: '✂️',
+      complete: '✅',
+      error: '❌',
+    };
+
+    return (
+      <View key={item.index} style={styles.videoQueueItem}>
+        <View style={styles.videoItemHeader}>
+          <View style={styles.videoItemLeft}>
+            <Text style={styles.videoItemIcon}>{statusIcons[item.status]}</Text>
+            <View style={styles.videoItemInfo}>
+              <Text style={styles.videoItemName} numberOfLines={1}>
+                {item.video.fileName}
+              </Text>
+              <Text style={styles.videoItemStatus}>
+                {item.status === 'queued' && 'Waiting...'}
+                {item.status === 'uploading' && 'Uploading...'}
+                {item.status === 'clipping' && 'Generating clips...'}
+                {item.status === 'complete' && `${item.clips?.length || 0} clips generated`}
+                {item.status === 'error' && item.error}
+              </Text>
+            </View>
+          </View>
+          {item.status === 'uploading' || item.status === 'clipping' ? (
+            <ActivityIndicator size="small" color={statusColors[item.status]} />
+          ) : null}
+        </View>
+
+        {/* Progress Bar */}
+        {(item.status === 'uploading' || item.status === 'clipping' || item.status === 'complete') && (
+          <View style={styles.progressContainer}>
+            <View style={styles.progressBar}>
+              <Animated.View 
+                style={[
+                  styles.progressFill, 
+                  { 
+                    backgroundColor: statusColors[item.status],
+                    width: progressAnim.interpolate({
+                      inputRange: [0, 100],
+                      outputRange: ['0%', '100%'],
+                    })
+                  }
+                ]} 
+              />
+            </View>
+            <View style={styles.progressInfo}>
+              <Text style={styles.progressText}>{Math.round(item.progress)}%</Text>
+              {item.clipsGenerated !== undefined && item.totalClips !== undefined && (
+                <Text style={styles.clipCountText}>
+                  {item.clipsGenerated}/{item.totalClips} clips
+                </Text>
+              )}
+            </View>
+          </View>
+        )}
+
+        {/* Details */}
+        {item.details && item.status !== 'complete' && (
+          <Text style={styles.videoItemDetails}>{item.details}</Text>
+        )}
+
+        {/* Metrics */}
+        {item.metrics && item.status === 'complete' && (
+          <View style={styles.videoMetrics}>
+            <Text style={styles.videoMetricText}>
+              Upload: {item.metrics.uploadTime}s • 
+              Clipping: {item.metrics.clipTime}s • 
+              Total: {item.metrics.totalTime}s
+            </Text>
+          </View>
+        )}
+      </View>
+    );
+  };
+
+  const allComplete = videoQueue.length > 0 && videoQueue.every(item => 
+    item.status === 'complete' || item.status === 'error'
+  );
+  const hasErrors = videoQueue.some(item => item.status === 'error');
+
+  if (error && !videoQueue.length) {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+        <StatusBar style="dark" />
         <View style={styles.errorContainer}>
           <Text style={styles.errorIcon}>⚠️</Text>
           <Text style={styles.errorTitle}>Processing Error</Text>
@@ -392,7 +578,6 @@ export default function Processing() {
             style={styles.retryButton}
             onPress={() => {
               setError(null);
-              setState({ phase: 'upload', progress: 0, status: 'Uploading video...' });
               processVideoQueue();
             }}
           >
@@ -405,85 +590,73 @@ export default function Processing() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
-      <View style={styles.content}>
-        <ActivityIndicator size="large" color="#007AFF" />
-        
-        <View style={styles.statusContainer}>
-          {state.currentVideoIndex && state.totalVideos && state.totalVideos > 1 && (
-            <Text style={styles.videoCounter}>
-              Video {state.currentVideoIndex} of {state.totalVideos}
+      <StatusBar style="dark" />
+      <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>
+            Processing {videoQueue.length} Video{videoQueue.length > 1 ? 's' : ''}
+          </Text>
+          <Text style={styles.headerSubtitle}>
+            {videoQueue.filter(v => v.status === 'complete').length} of {videoQueue.length} complete
+            {processingRef.current.size > 0 && ` • ${processingRef.current.size} processing`}
+            {backendConfig && ` • Max ${backendConfig.max_concurrent_videos} concurrent`}
+          </Text>
+          {backendConfig && (
+            <Text style={styles.configInfo}>
+              Backend: {backendConfig.system_info.cpus} CPUs • {backendConfig.max_concurrent_clips} max clips/video
             </Text>
-          )}
-          {state.currentVideoName && (
-            <Text style={styles.videoName} numberOfLines={1}>
-              {state.currentVideoName}
-            </Text>
-          )}
-          <Text style={styles.statusText}>{state.status}</Text>
-          {state.details && (
-            <Text style={styles.detailsText}>{state.details}</Text>
           )}
         </View>
 
-        {/* Progress Bar */}
-        <View style={styles.progressContainer}>
-          <View style={styles.progressBar}>
-            <Animated.View 
-              style={[
-                styles.progressFill, 
-                { 
-                  width: progressAnim.interpolate({
-                    inputRange: [0, 100],
-                    outputRange: ['0%', '100%'],
-                  })
-                }
-              ]} 
-            />
-          </View>
-          <View style={styles.progressInfo}>
-            <Text style={styles.progressText}>{Math.round(state.progress)}%</Text>
-            {state.clipsGenerated !== undefined && state.totalClips !== undefined && (
-              <Text style={styles.clipCountText}>
-                {state.clipsGenerated}/{state.totalClips} clips
-              </Text>
-            )}
-          </View>
+        {/* Video Queue */}
+        <View style={styles.queueContainer}>
+          {videoQueue.map(renderVideoItem)}
         </View>
+
+        {/* Overall Progress */}
+        {videoQueue.length > 1 && (
+          <View style={styles.overallProgress}>
+            <Text style={styles.overallProgressText}>
+              Overall Progress: {Math.round(
+                (videoQueue.reduce((sum, item) => sum + item.progress, 0) / videoQueue.length)
+              )}%
+            </Text>
+            <View style={styles.overallProgressBar}>
+              <View 
+                style={[
+                  styles.overallProgressFill,
+                  {
+                    width: `${(videoQueue.reduce((sum, item) => sum + item.progress, 0) / videoQueue.length)}%`
+                  }
+                ]} 
+              />
+            </View>
+          </View>
+        )}
 
         {/* Elapsed Time */}
         <Text style={styles.elapsedTime}>
           {elapsedTime.toFixed(1)}s elapsed
         </Text>
 
-        {/* Metrics */}
-        {metrics.uploadTime && (
-          <View style={styles.metricsContainer}>
-            <View style={styles.metric}>
-              <Text style={styles.metricLabel}>Upload</Text>
-              <Text style={styles.metricValue}>{metrics.uploadTime}s</Text>
-            </View>
-            {metrics.clipTime && (
-              <View style={styles.metric}>
-                <Text style={styles.metricLabel}>Clipping</Text>
-                <Text style={styles.metricValue}>{metrics.clipTime}s</Text>
-              </View>
-            )}
-            {metrics.totalTime && (
-              <View style={styles.metric}>
-                <Text style={styles.metricLabel}>Total</Text>
-                <Text style={styles.metricValue}>{metrics.totalTime}s</Text>
-              </View>
-            )}
+        {/* Completion Message */}
+        {allComplete && !hasErrors && (
+          <View style={styles.completionContainer}>
+            <Text style={styles.completionText}>✅ All videos processed!</Text>
+            <Text style={styles.completionSubtext}>
+              Redirecting to results...
+            </Text>
           </View>
         )}
 
-        {state.phase === 'upload' && (
-          <Text style={styles.hintText}>Uploading video file...</Text>
+        {hasErrors && (
+          <View style={styles.warningContainer}>
+            <Text style={styles.warningText}>
+              ⚠️ Some videos failed to process. Check individual status above.
+            </Text>
+          </View>
         )}
-        {state.phase === 'clipping' && (
-          <Text style={styles.hintText}>Analyzing and generating clips...</Text>
-        )}
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -492,62 +665,96 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
+  },
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
     padding: 20,
   },
-  content: {
-    width: '100%',
-    maxWidth: 400,
+  header: {
+    marginBottom: 24,
     alignItems: 'center',
   },
-  statusContainer: {
-    marginTop: 30,
-    alignItems: 'center',
-    marginBottom: 30,
-  },
-  videoCounter: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#007AFF',
-    marginBottom: 8,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  videoName: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 12,
-    maxWidth: '90%',
-  },
-  statusText: {
-    fontSize: 22,
+  headerTitle: {
+    fontSize: 24,
     fontWeight: '700',
     color: '#000',
     marginBottom: 8,
   },
-  detailsText: {
-    fontSize: 16,
+  headerSubtitle: {
+    fontSize: 14,
     color: '#666',
     textAlign: 'center',
+    marginBottom: 4,
+  },
+  configInfo: {
+    fontSize: 11,
+    color: '#999',
+    textAlign: 'center',
+    marginTop: 4,
+    fontStyle: 'italic',
+  },
+  queueContainer: {
+    marginBottom: 24,
+  },
+  videoQueueItem: {
+    backgroundColor: '#F8F8F8',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: '#E5E5E5',
+  },
+  videoItemHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  videoItemLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  videoItemIcon: {
+    fontSize: 24,
+    marginRight: 12,
+  },
+  videoItemInfo: {
+    flex: 1,
+  },
+  videoItemName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#000',
+    marginBottom: 4,
+  },
+  videoItemStatus: {
+    fontSize: 13,
+    color: '#666',
+  },
+  videoItemDetails: {
+    fontSize: 12,
+    color: '#999',
+    marginTop: 8,
+    fontStyle: 'italic',
   },
   progressContainer: {
     width: '100%',
-    marginBottom: 20,
+    marginTop: 12,
   },
   progressBar: {
     width: '100%',
-    height: 10,
+    height: 8,
     backgroundColor: '#E5E5E5',
-    borderRadius: 5,
+    borderRadius: 4,
     overflow: 'hidden',
-    marginBottom: 8,
+    marginBottom: 6,
   },
   progressFill: {
     height: '100%',
-    backgroundColor: '#007AFF',
-    borderRadius: 5,
+    borderRadius: 4,
   },
   progressInfo: {
     flexDirection: 'row',
@@ -555,54 +762,91 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   progressText: {
-    fontSize: 14,
+    fontSize: 12,
     color: '#666',
     fontWeight: '600',
   },
   clipCountText: {
-    fontSize: 12,
+    fontSize: 11,
     color: '#999',
     fontWeight: '500',
+  },
+  videoMetrics: {
+    marginTop: 8,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#E5E5E5',
+  },
+  videoMetricText: {
+    fontSize: 11,
+    color: '#666',
+  },
+  overallProgress: {
+    marginBottom: 20,
+    padding: 16,
+    backgroundColor: '#F0F7FF',
+    borderRadius: 12,
+  },
+  overallProgressText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#007AFF',
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  overallProgressBar: {
+    width: '100%',
+    height: 10,
+    backgroundColor: '#E5E5E5',
+    borderRadius: 5,
+    overflow: 'hidden',
+  },
+  overallProgressFill: {
+    height: '100%',
+    backgroundColor: '#007AFF',
+    borderRadius: 5,
   },
   elapsedTime: {
     fontSize: 12,
     color: '#999',
-    marginBottom: 20,
+    textAlign: 'center',
+    marginBottom: 16,
     fontWeight: '500',
   },
-  metricsContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    width: '100%',
-    marginBottom: 20,
-    paddingVertical: 15,
-    backgroundColor: '#F8F8F8',
-    borderRadius: 12,
-  },
-  metric: {
+  completionContainer: {
     alignItems: 'center',
+    padding: 20,
+    backgroundColor: '#E8F5E9',
+    borderRadius: 12,
+    marginTop: 8,
   },
-  metricLabel: {
-    fontSize: 12,
-    color: '#666',
-    marginBottom: 4,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  metricValue: {
-    fontSize: 20,
+  completionText: {
+    fontSize: 18,
     fontWeight: '700',
-    color: '#007AFF',
+    color: '#34C759',
+    marginBottom: 4,
   },
-  hintText: {
+  completionSubtext: {
     fontSize: 14,
-    color: '#999',
+    color: '#666',
+  },
+  warningContainer: {
+    alignItems: 'center',
+    padding: 16,
+    backgroundColor: '#FFF3E0',
+    borderRadius: 12,
+    marginTop: 8,
+  },
+  warningText: {
+    fontSize: 14,
+    color: '#FF9500',
     textAlign: 'center',
-    marginTop: 10,
   },
   errorContainer: {
     alignItems: 'center',
     padding: 30,
+    justifyContent: 'center',
+    flex: 1,
   },
   errorIcon: {
     fontSize: 64,

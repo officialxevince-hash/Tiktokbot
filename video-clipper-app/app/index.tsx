@@ -19,8 +19,9 @@ export default function VideoPicker() {
       }
 
       // Pick videos (allow multiple)
+      // Using MediaType string literal ('videos') instead of deprecated MediaTypeOptions
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Videos,
+        mediaTypes: 'videos',
         allowsEditing: false,
         quality: 1,
         allowsMultipleSelection: true,

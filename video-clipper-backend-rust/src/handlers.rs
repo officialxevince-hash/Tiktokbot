@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     ffmpeg,
-    models::{Clip, ClipRequest, ClipResponse, ErrorResponse, UploadResponse, VideoMetadata},
+    models::{Clip, ClipRequest, ClipResponse, ConfigResponse, ErrorResponse, SystemInfoResponse, UploadResponse, VideoMetadata},
     system_info,
 };
 use axum::{
@@ -15,7 +15,7 @@ use std::{
     time::SystemTime,
 };
 use tokio::io::AsyncWriteExt;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::models::AppState;
@@ -54,7 +54,7 @@ pub async fn upload_handler(
             }),
         )
     })? {
-        let name = field.name().unwrap_or("").to_string();
+        let name = field.name().unwrap_or(&state.config.server_defaults.default_field_name).to_string();
         info!("[POST /upload] Processing field: '{}'", name);
         
         if name == "file" {
@@ -71,7 +71,7 @@ pub async fn upload_handler(
                 }
             }
 
-            let original_name = field.file_name().unwrap_or("video.mp4").to_string();
+            let original_name = field.file_name().unwrap_or(&state.config.server_defaults.default_filename).to_string();
             info!("[POST /upload] File name: {}", original_name);
             
             // Create file path
@@ -95,7 +95,7 @@ pub async fn upload_handler(
 
             // Stream chunks to file using buffered writes for better performance
             let mut chunk_count = 0;
-            let mut buffer = Vec::with_capacity(64 * 1024); // 64KB buffer
+            let mut buffer = Vec::with_capacity(state.config.upload_buffer_size); // Use configured buffer size
             
             loop {
                 let chunk = match field.chunk().await {
@@ -280,6 +280,33 @@ pub async fn upload_handler(
     Ok(Json(UploadResponse { video_id }))
 }
 
+/// Get backend configuration and system limits
+pub async fn config_handler(
+    State(state): State<Arc<AppState>>,
+) -> Json<ConfigResponse> {
+    let sys_info = system_info::get_system_info();
+    
+    // Calculate safe number of concurrent videos
+    // Each video can generate multiple clips, so we need to be conservative
+    // Formula: max(1, min(3, max_concurrent_clips / 3))
+    // This ensures we don't overload the system while allowing some parallelism
+    let max_concurrent_videos = {
+        let calculated = (state.config.max_concurrent_clips as f64 / 3.0).ceil() as usize;
+        calculated.max(1).min(3)
+    };
+    
+    Json(ConfigResponse {
+        max_concurrent_clips: state.config.max_concurrent_clips,
+        max_file_size: state.config.max_file_size,
+        max_concurrent_videos,
+        system_info: SystemInfoResponse {
+            cpus: sys_info.cpus,
+            memory_free_gb: sys_info.memory_free_gb,
+            memory_total_gb: sys_info.memory_total_gb,
+        },
+    })
+}
+
 /// Generate clips from video
 pub async fn clip_handler(
     State(state): State<Arc<AppState>>,
@@ -327,12 +354,19 @@ pub async fn clip_handler(
         sys_info.cpus, sys_info.memory_free_gb
     );
 
+    // Use config default if max_length not provided
+    let max_length = if request.max_length > 0.0 {
+        request.max_length
+    } else {
+        state.config.limits.default_max_clip_length
+    };
+    
     // Generate clips
     let clips = generate_time_based_clips(
         &video.file_path,
         &request.video_id,
         video.duration,
-        request.max_length,
+        max_length,
         &state.config,
     )
     .await
@@ -373,6 +407,9 @@ pub async fn clip_handler(
         .collect::<Vec<_>>()
         .join(", ");
     info!("[POST /clip] 📊 Clips: {}", clips_str);
+
+    // Housekeeping: Clean up unneeded files after successful clipping
+    cleanup_after_clipping(&state, &video).await;
 
     Ok(Json(ClipResponse { clips }))
 }
@@ -437,6 +474,7 @@ async fn generate_time_based_clips(
         let video_id = video_id.to_string();
 
         let ffmpeg_config = config.ffmpeg.clone();
+        let concurrent_clips = config.max_concurrent_clips;
         let handle = tokio::spawn(async move {
             let _permit = permit; // Hold permit until clip is done
             let clip_id = format!("clip-{}", index);
@@ -457,8 +495,7 @@ async fn generate_time_based_clips(
                 "[generateClips] 💾 Memory before clip: RSS={:.2}MB, Free={:.2}GB",
                 clip_mem_before.rss_mb, clip_free_mem
             );
-
-            match ffmpeg::generate_clip(&input_path, &output_path, clip_start, clip_duration, &ffmpeg_config).await
+            match ffmpeg::generate_clip(&input_path, &output_path, clip_start, clip_duration, &ffmpeg_config, concurrent_clips).await
             {
                 Ok(()) => {
                     let clip_time = clip_start_time.elapsed().unwrap().as_secs_f64();
@@ -475,9 +512,24 @@ async fn generate_time_based_clips(
                         clip_free_mem
                     );
 
+                    // Generate thumbnail for the clip (extract frame at 0.2s or 2% of duration)
+                    let thumbnail_path = output_base.join(format!("{}.jpg", clip_id));
+                    let thumbnail_time = 0.2f64.min(clip_duration * 0.02); // Use 0.2s or 2% of clip duration, whichever is smaller
+                    
+                    match ffmpeg::generate_thumbnail(&output_path, &thumbnail_path, thumbnail_time).await {
+                        Ok(()) => {
+                            info!("[generateClips] ✓ Thumbnail {} generated at {:.2}s", clip_id, thumbnail_time);
+                        }
+                        Err(e) => {
+                            warn!("[generateClips] ⚠️  Failed to generate thumbnail for {}: {}", clip_id, e);
+                            // Continue even if thumbnail generation fails - clip is still valid
+                        }
+                    }
+
                     Ok(Clip {
-                        id: clip_id,
-                        url: format!("/clips/{}/{}.mp4", video_id, index),
+                        id: clip_id.clone(),
+                        url: format!("/clips/{}/{}.mp4", video_id, clip_id),
+                        thumbnail_url: format!("/clips/{}/{}.jpg", video_id, clip_id),
                         duration: clip_duration,
                     })
                 }
@@ -542,5 +594,46 @@ async fn generate_time_based_clips(
     );
 
     Ok(clips)
+}
+
+/// Clean up unneeded files after successful clipping
+async fn cleanup_after_clipping(state: &Arc<AppState>, video: &VideoMetadata) {
+    info!("[cleanup] 🧹 Starting housekeeping for video: {}", video.id);
+
+    // Delete the original video file from uploads directory
+    if video.file_path.exists() {
+        match tokio::fs::remove_file(&video.file_path).await {
+            Ok(()) => {
+                let file_size_mb = (video.file_size as f64 / 1024.0 / 1024.0) as f64;
+                info!(
+                    "[cleanup] ✅ Deleted original video file: {} ({:.2} MB)",
+                    video.file_path.display(),
+                    file_size_mb
+                );
+            }
+            Err(e) => {
+                error!(
+                    "[cleanup] ❌ Failed to delete original video file {}: {}",
+                    video.file_path.display(),
+                    e
+                );
+            }
+        }
+    } else {
+        info!(
+            "[cleanup] ℹ️  Original video file already removed: {}",
+            video.file_path.display()
+        );
+    }
+
+    // Remove video metadata from state
+    let mut videos = state.videos.write().await;
+    if videos.remove(&video.id).is_some() {
+        info!("[cleanup] ✅ Removed video metadata from state: {}", video.id);
+    } else {
+        info!("[cleanup] ℹ️  Video metadata not found in state: {}", video.id);
+    }
+
+    info!("[cleanup] ✅ Housekeeping complete for video: {}", video.id);
 }
 

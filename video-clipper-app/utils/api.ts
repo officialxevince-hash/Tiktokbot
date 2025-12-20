@@ -1,17 +1,29 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { API_BASE_URL } from './config';
+import { API_BASE_URL, APP_CONFIG } from './config';
 
 export interface Clip {
   id: string;
   url: string;
+  thumbnail_url: string;
   duration: number;
+}
+
+export interface BackendConfig {
+  max_concurrent_clips: number;
+  max_file_size: number;
+  max_concurrent_videos: number;
+  system_info: {
+    cpus: number;
+    memory_free_gb: number;
+    memory_total_gb: number;
+  };
 }
 
 // Helper function to fetch with timeout
 const fetchWithTimeout = async (
   url: string,
   options: RequestInit,
-  timeoutMs: number = 600000 // 10 minutes default
+  timeoutMs: number
 ): Promise<Response> => {
   const controller = new AbortController();
   let timeoutId: NodeJS.Timeout | null = null;
@@ -86,7 +98,7 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
     console.log('[uploadVideo] Upload URL:', uploadUrl);
     
     const uploadStart = performance.now();
-    console.log('[uploadVideo] Making fetch request with 15 minute timeout...');
+    console.log(`[uploadVideo] Making fetch request with ${APP_CONFIG.api.timeout.upload / 1000 / 60} minute timeout...`);
 
     // Use fetchWithTimeout for uploads (large files can take a while)
     const response = await fetchWithTimeout(
@@ -96,7 +108,7 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
         body: formData,
         // Don't set Content-Type header - let fetch set it with boundary
       },
-      900000 // 15 minutes timeout for uploads
+      APP_CONFIG.api.timeout.upload
     );
 
     const uploadTime = ((performance.now() - uploadStart) / 1000).toFixed(3);
@@ -154,7 +166,7 @@ export async function generateClips(videoId: string, maxLength: number = 15): Pr
     console.log('[generateClips] Request body:', JSON.stringify(requestBody, null, 2));
     
     const requestStart = performance.now();
-    console.log('[generateClips] Making fetch request with 10 minute timeout...');
+    console.log(`[generateClips] Making fetch request with ${APP_CONFIG.api.timeout.clip / 1000 / 60} minute timeout...`);
 
     // Use fetchWithTimeout for clip generation (can take a while for large videos)
     const response = await fetchWithTimeout(
@@ -166,7 +178,7 @@ export async function generateClips(videoId: string, maxLength: number = 15): Pr
         },
         body: JSON.stringify(requestBody),
       },
-      600000 // 10 minutes timeout for clip generation
+      APP_CONFIG.api.timeout.clip
     );
 
     const requestTime = ((performance.now() - requestStart) / 1000).toFixed(3);
@@ -198,6 +210,54 @@ export async function generateClips(videoId: string, maxLength: number = 15): Pr
     if (error instanceof Error) {
       console.error('[generateClips] Error message:', error.message);
       console.error('[generateClips] Error stack:', error.stack);
+    }
+    throw error;
+  }
+}
+
+export async function getConfig(): Promise<BackendConfig> {
+  const startTime = performance.now();
+  console.log(`[getConfig] ⏱️  START - ${new Date().toISOString()}`);
+  console.log('[getConfig] API_BASE_URL:', API_BASE_URL);
+  
+  try {
+    const configUrl = `${API_BASE_URL}/config`;
+    console.log('[getConfig] Config URL:', configUrl);
+    
+    const response = await fetchWithTimeout(
+      configUrl,
+      {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      },
+      APP_CONFIG.api.timeout.config
+    );
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error('[getConfig] Response error text:', errorText);
+      let error;
+      try {
+        error = JSON.parse(errorText);
+      } catch {
+        error = { error: errorText || 'Failed to get config' };
+      }
+      throw new Error(error.error || 'Failed to get backend configuration');
+    }
+
+    const data = await response.json();
+    const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
+    console.log(`[getConfig] ✅ SUCCESS - Total time: ${totalTime}s`);
+    console.log('[getConfig] Config:', JSON.stringify(data, null, 2));
+    return data;
+  } catch (error) {
+    const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
+    console.error(`[getConfig] ❌ ERROR after ${totalTime}s:`, error);
+    if (error instanceof Error) {
+      console.error('[getConfig] Error message:', error.message);
+      console.error('[getConfig] Error stack:', error.stack);
     }
     throw error;
   }

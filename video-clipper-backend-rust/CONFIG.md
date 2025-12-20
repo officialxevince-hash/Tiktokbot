@@ -98,3 +98,5 @@ The following settings support auto-detection (set to 0 or leave unset):
 
 Auto-detection ensures optimal performance based on your system resources.
 
+
+

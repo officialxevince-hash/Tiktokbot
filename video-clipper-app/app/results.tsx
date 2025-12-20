@@ -1,13 +1,17 @@
-import { useState, useMemo } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, ScrollView } from 'react-native';
+import { useState, useMemo, useRef, useEffect } from 'react';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, ScrollView, AppState, AppStateStatus, Image } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { StatusBar } from 'expo-status-bar';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
-import { API_BASE_URL } from '../utils/config';
+import { API_BASE_URL, APP_CONFIG } from '../utils/config';
 
 interface Clip {
   id: string;
   url: string;
+  thumbnail_url: string;
   duration: number;
 }
 
@@ -19,6 +23,9 @@ export default function Results() {
   const [saving, setSaving] = useState<string | null>(null);
   const [selectedClips, setSelectedClips] = useState<Set<string>>(new Set());
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('none');
+  const videoPlayersRef = useRef<Map<string, any>>(new Map());
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const [visibleClips, setVisibleClips] = useState<Set<string>>(new Set());
   
   const clips: Clip[] = params.clips ? JSON.parse(params.clips as string) : [];
   const videoId = params.videoId as string;
@@ -27,6 +34,34 @@ export default function Results() {
   const totalDuration = useMemo(() => {
     return clips.reduce((sum, clip) => sum + clip.duration, 0);
   }, [clips]);
+
+  // Prevent cleanup when app goes to background
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
+      if (
+        appStateRef.current.match(/inactive|background/) &&
+        nextAppState === 'active'
+      ) {
+        console.log('[Results] App returned to foreground - restoring video players');
+        // Restore video players when app comes back
+        videoPlayersRef.current.forEach((player, clipId) => {
+          if (player && !player.playing) {
+            // Ensure players are ready
+            try {
+              player.currentTime = 0;
+            } catch (e) {
+              console.warn(`[Results] Could not restore player for ${clipId}:`, e);
+            }
+          }
+        });
+      }
+      appStateRef.current = nextAppState;
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
 
   const toggleSelection = (clipId: string) => {
     const newSelected = new Set(selectedClips);
@@ -151,8 +186,166 @@ export default function Results() {
     }
   };
 
+  const ClipVideoPreview = ({ videoUrl, thumbnailUrl, clipId, index, duration, isVisible }: { videoUrl: string; thumbnailUrl: string; clipId: string; index: number; duration: number; isVisible: boolean }) => {
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [shouldLoad, setShouldLoad] = useState(isVisible);
+    const playerRef = useRef<any>(null);
+    
+    // Only create player when visible or about to be visible
+    const player = useVideoPlayer(shouldLoad ? videoUrl : '', (player) => {
+      if (!shouldLoad) return;
+      player.loop = APP_CONFIG.video.player.loop;
+      player.muted = APP_CONFIG.video.player.muted;
+      playerRef.current = player;
+      videoPlayersRef.current.set(clipId, player);
+    });
+
+    // Lazy load: only load when visible
+    useEffect(() => {
+      if (isVisible && !shouldLoad) {
+        setShouldLoad(true);
+      }
+    }, [isVisible, shouldLoad, clipId]);
+
+    // Listen to playing state changes
+    useEffect(() => {
+      if (!player || !shouldLoad) return;
+      
+      const playingListener = player.addListener('playingChange', () => {
+        try {
+          setIsPlaying(player?.playing ?? false);
+        } catch (e) {
+          // Player may have been disposed
+        }
+      });
+      
+      // Set initial playing state
+      try {
+        setIsPlaying(player?.playing ?? false);
+      } catch (e) {
+        // Player may not be ready yet
+      }
+      
+      return () => {
+        playingListener.remove();
+      };
+    }, [player, shouldLoad]);
+
+    // Handle video ending - pause and show thumbnail
+    useEffect(() => {
+      if (!player || !shouldLoad) return;
+      
+      const timeUpdateListener = player.addListener('timeUpdate', () => {
+        try {
+          if (player.currentTime >= duration - 0.1 && player.playing) {
+            player.pause();
+            setIsPlaying(false);
+          }
+        } catch (e) {
+          // Player may have been disposed
+        }
+      });
+
+      return () => {
+        timeUpdateListener.remove();
+      };
+    }, [player, duration, shouldLoad]);
+
+    const handlePlayPause = () => {
+      try {
+        if (!player) return;
+        
+        if (isPlaying) {
+          player.pause();
+          setIsPlaying(false);
+        } else {
+          player.loop = APP_CONFIG.video.player.loop;
+          player.play();
+          setIsPlaying(true);
+        }
+      } catch (e) {
+        // Player may have been disposed
+      }
+    };
+
+    const fullThumbnailUrl = `${API_BASE_URL}${thumbnailUrl}`;
+    
+    if (!shouldLoad) {
+      // Placeholder while not visible - show thumbnail image
+      return (
+        <View style={styles.videoContainer}>
+          <Image
+            source={{ uri: fullThumbnailUrl }}
+            style={styles.videoPreview}
+            resizeMode="cover"
+          />
+          <View style={styles.clipIndexBadge}>
+            <Text style={styles.clipIndexText}>#{index + 1}</Text>
+          </View>
+        </View>
+      );
+    }
+
+    if (!player) {
+      // Show thumbnail while player initializes
+      return (
+        <View style={styles.videoContainer}>
+          <Image
+            source={{ uri: fullThumbnailUrl }}
+            style={styles.videoPreview}
+            resizeMode="cover"
+          />
+          <View style={styles.clipIndexBadge}>
+            <Text style={styles.clipIndexText}>#{index + 1}</Text>
+          </View>
+        </View>
+      );
+    }
+
+    return (
+      <View style={styles.videoContainer}>
+        {isPlaying && player ? (
+          <VideoView
+            player={player}
+            style={styles.videoPreview}
+            contentFit="cover"
+            nativeControls={false}
+            fullscreenOptions={{ enable: false }}
+            allowsPictureInPicture={false}
+          />
+        ) : (
+          <Image
+            source={{ uri: fullThumbnailUrl }}
+            style={styles.videoPreview}
+            resizeMode="cover"
+          />
+        )}
+        <View style={styles.clipIndexBadge}>
+          <Text style={styles.clipIndexText}>#{index + 1}</Text>
+        </View>
+        {!isPlaying && (
+          <TouchableOpacity
+            style={styles.playButtonOverlay}
+            onPress={handlePlayPause}
+            activeOpacity={0.8}
+          >
+            <View style={styles.playButton}>
+              <Text style={styles.playButtonIcon}>▶</Text>
+            </View>
+          </TouchableOpacity>
+        )}
+        <TouchableOpacity
+          style={styles.videoTapArea}
+          onPress={handlePlayPause}
+          activeOpacity={1}
+        />
+      </View>
+    );
+  };
+
   const renderClip = ({ item, index }: { item: Clip; index: number }) => {
     const videoUrl = `${API_BASE_URL}${item.url}`;
+    const thumbnailUrl = item.thumbnail_url || item.url.replace('.mp4', '.jpg'); // Fallback if thumbnail_url not provided
     const isSelected = selectedClips.has(item.id);
     const isSaving = saving === item.id;
     
@@ -175,16 +368,14 @@ export default function Results() {
           </View>
         )}
         
-        <View style={styles.videoContainer}>
-          <View style={styles.videoPlaceholder}>
-            <Text style={styles.placeholderIcon}>▶</Text>
-            <Text style={styles.placeholderText}>{item.id}</Text>
-            <Text style={styles.placeholderSubtext}>{item.duration.toFixed(1)}s</Text>
-            <View style={styles.clipIndexBadge}>
-              <Text style={styles.clipIndexText}>#{index + 1}</Text>
-            </View>
-          </View>
-        </View>
+        <ClipVideoPreview
+          videoUrl={videoUrl}
+          thumbnailUrl={thumbnailUrl}
+          clipId={item.id}
+          index={index}
+          duration={item.duration}
+          isVisible={visibleClips.has(item.id) || index < 3}
+        />
         
         <View style={styles.clipInfo}>
           <View style={styles.clipInfoLeft}>
@@ -224,9 +415,11 @@ export default function Results() {
   };
 
   return (
-    <View style={styles.container}>
-      {/* Header with stats and actions */}
-      <View style={styles.header}>
+    <>
+      <StatusBar style="dark" />
+      <SafeAreaView style={styles.container} edges={['top']}>
+        {/* Header with stats and actions */}
+        <View style={styles.header}>
         <View style={styles.headerTop}>
           <View>
             <Text style={styles.title}>{clips.length} Clips</Text>
@@ -302,17 +495,33 @@ export default function Results() {
         renderItem={renderClip}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.list}
-        removeClippedSubviews={true}
-        maxToRenderPerBatch={5}
-        windowSize={10}
-        initialNumToRender={3}
+        removeClippedSubviews={APP_CONFIG.list.removeClippedSubviews}
+        maxToRenderPerBatch={APP_CONFIG.list.maxToRenderPerBatch}
+        windowSize={APP_CONFIG.list.windowSize}
+        initialNumToRender={APP_CONFIG.list.initialNumToRender}
+        updateCellsBatchingPeriod={APP_CONFIG.list.updateCellsBatchingPeriod}
+        getItemLayout={(data, index) => ({
+          length: APP_CONFIG.list.itemHeight,
+          offset: APP_CONFIG.list.itemHeight * index,
+          index,
+        })}
+        onViewableItemsChanged={({ viewableItems }) => {
+          // Update visible clips for lazy loading
+          const visibleIds = new Set(viewableItems.map(item => item.item.id));
+          setVisibleClips(visibleIds);
+        }}
+        viewabilityConfig={{
+          itemVisiblePercentThreshold: APP_CONFIG.list.viewabilityThreshold,
+          minimumViewTime: APP_CONFIG.list.minimumViewTime,
+        }}
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Text style={styles.emptyText}>No clips generated</Text>
           </View>
         }
       />
-    </View>
+      </SafeAreaView>
+    </>
   );
 }
 
@@ -445,42 +654,54 @@ const styles = StyleSheet.create({
     height: 180,
     backgroundColor: '#000',
     position: 'relative',
+    overflow: 'hidden',
   },
-  video: {
+  videoPreview: {
     width: '100%',
     height: '100%',
   },
-  videoPlaceholder: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#1a1a1a',
+  playButtonOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     justifyContent: 'center',
     alignItems: 'center',
-    position: 'relative',
+    zIndex: 5,
   },
-  placeholderIcon: {
-    fontSize: 48,
+  videoTapArea: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 4,
+  },
+  playButton: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.8)',
+  },
+  playButtonIcon: {
     color: '#fff',
-    marginBottom: 8,
-  },
-  placeholderText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 4,
-  },
-  placeholderSubtext: {
-    color: '#999',
-    fontSize: 12,
+    fontSize: 24,
+    marginLeft: 4,
   },
   clipIndexBadge: {
     position: 'absolute',
     top: 8,
     right: 8,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    backgroundColor: 'rgba(0,0,0,0.7)',
     paddingHorizontal: 8,
     paddingVertical: 4,
     borderRadius: 4,
+    zIndex: 10,
   },
   clipIndexText: {
     color: '#fff',

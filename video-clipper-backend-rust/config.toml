@@ -19,21 +19,24 @@ max_file_size = 524288000
 # Auto-detection: CPU count - 1, min 2, max 8
 max_concurrent_clips = 0
 
-# Upload buffer size in bytes (64KB default for optimal I/O)
-upload_buffer_size = 65536
+# Upload buffer size in bytes (512KB for better I/O performance with large files)
+# Larger buffers reduce system calls and improve throughput
+upload_buffer_size = 524288
 
 # Chunk logging interval (log progress every N chunks)
 upload_log_interval = 100
 
 [ffmpeg]
 # Video encoding preset (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow)
-# veryfast is recommended: good balance of speed and quality
-preset = "veryfast"
+# ultrafast = maximum speed (recommended for short clips where speed > quality)
+# veryfast = good balance of speed and quality (use if quality is more important)
+preset = "ultrafast"
 
 # Constant Rate Factor (CRF) - quality setting
 # Lower = better quality but larger files (18-28 range recommended)
-# 23 is a good balance
-crf = 23
+# 28 = faster encoding, acceptable quality for short clips
+# 23 = better quality, slower encoding (use if quality is critical)
+crf = 28
 
 # Video codec profile (baseline, main, high)
 # baseline = fastest encoding, best compatibility
@@ -95,4 +98,59 @@ clip_generation_timeout = 0
 
 # Timeout for video upload in seconds (0 = no timeout)
 upload_timeout = 0
+
+# Default max clip length in seconds
+default_max_clip_length = 15.0
+
+# Cleanup task interval in seconds (how often to run cleanup)
+cleanup_interval_seconds = 300
+
+# Maximum age for files before cleanup in seconds
+cleanup_max_age_seconds = 1800
+
+[ffmpeg.advanced]
+# Thread queue size for input (larger = better I/O)
+thread_queue_size = 512
+
+# Buffer size for encoding (e.g., "1M", "512k")
+bufsize = "1M"
+
+# Maximum bitrate (e.g., "4M", "2M")
+maxrate = "4M"
+
+# GOP size (Group of Pictures) for faster seeking
+gop_size = 30
+
+# Minimum keyframe interval
+keyint_min = 30
+
+# Default video codec fallback (if hardware acceleration not available)
+default_video_codec = "libx264"
+
+# VideoToolbox quality calculation settings
+videotoolbox_quality_min = 50
+videotoolbox_quality_max = 100
+videotoolbox_crf_multiplier = 3.57
+
+# Hardware encoder presets
+nvenc_preset = "p1"
+nvenc_rc = "vbr"
+qsv_preset = "veryfast"
+amf_quality = "speed"
+amf_rc = "vbr_peak"
+
+# Thread allocation settings
+threads_when_1_2_clips_min = 2
+threads_when_1_2_clips_max = 6
+threads_when_3_4_clips_min = 1
+threads_when_3_4_clips_max = 4
+threads_when_many_clips_min = 1
+threads_when_many_clips_max = 2
+
+[server.defaults]
+# Default filename when not provided
+default_filename = "video.mp4"
+
+# Default field name for multipart
+default_field_name = ""
 
