@@ -14,7 +14,7 @@ A high-performance Rust backend for automatically splitting videos into short cl
 
 ## Prerequisites
 
-- Rust 1.78+ ([Install Rust](https://www.rust-lang.org/tools/install))
+- Rust 1.80+ ([Install Rust](https://www.rust-lang.org/tools/install))
 - FFmpeg installed and in PATH
 - FFprobe (comes with FFmpeg)
 
@@ -120,7 +120,7 @@ src/
 ### Docker
 
 ```dockerfile
-FROM rust:1.78 AS builder
+FROM rust:1.80 AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release

@@ -1,6 +1,6 @@
 # Build stage
-# Use Rust 1.78+ to support Cargo.lock version 4
-FROM rust:1.78 AS builder
+# Use Rust 1.80+ to support Cargo.lock version 4 and all dependencies
+FROM rust:1.80 AS builder
 
 WORKDIR /app
 
