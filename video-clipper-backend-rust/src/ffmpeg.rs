@@ -39,8 +39,12 @@ pub async fn generate_clip(
     duration: f64,
 ) -> Result<()> {
     let output = Command::new("ffmpeg")
+        // Input options (must come before -i)
+        .arg("-thread_queue_size")
+        .arg("512")
         .arg("-i")
         .arg(input_path)
+        // Output options
         .arg("-ss")
         .arg(start_time.to_string())
         .arg("-t")
@@ -65,8 +69,6 @@ pub async fn generate_clip(
         .arg("512k")
         .arg("-maxrate")
         .arg("1M")
-        .arg("-thread_queue_size")
-        .arg("512")
         .arg("-y") // Overwrite output file
         .arg(output_path)
         .stdout(Stdio::null())
