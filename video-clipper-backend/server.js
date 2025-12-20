@@ -450,6 +450,9 @@ async function generateTimeBasedClips(inputPath, videoId, duration, maxLength) {
         console.log(`[generateClips] 💾 Memory before clip: RSS=${(clipMemBefore.rss / 1024 / 1024).toFixed(2)}MB, Free=${clipFreeMem}GB`);
         
         ffmpeg(inputPath)
+          .inputOptions([
+            '-thread_queue_size', '512'  // Input option: small queue size for memory efficiency
+          ])
           .setStartTime(clipStart)
           .setDuration(clipDuration)
           .outputOptions([
@@ -462,9 +465,7 @@ async function generateTimeBasedClips(inputPath, videoId, duration, maxLength) {
             '-tune', 'fastdecode',       // Optimize for fast decoding
             '-pix_fmt', 'yuv420p',       // Ensure compatibility
             '-bufsize', '512k',          // Small buffer to reduce memory
-            '-maxrate', '1M',            // Low bitrate to reduce memory usage
-            '-vf', 'scale=iw:ih',        // No scaling to save memory
-            '-thread_queue_size', '512'  // Small queue size
+            '-maxrate', '1M'             // Low bitrate to reduce memory usage
           ])
           .output(outputPath)
           .on('end', () => {
