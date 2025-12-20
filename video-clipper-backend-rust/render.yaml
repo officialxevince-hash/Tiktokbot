@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: video-clipper-backend-rust
+    env: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      - key: PORT
+        generateValue: true
+      - key: NODE_ENV
+        value: production
+

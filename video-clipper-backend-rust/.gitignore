@@ -1,0 +1,8 @@
+target/
+Cargo.lock
+uploads/
+clips/
+*.log
+.env
+.DS_Store
+
