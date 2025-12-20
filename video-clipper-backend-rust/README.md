@@ -14,7 +14,9 @@ A high-performance Rust backend for automatically splitting videos into short cl
 
 ## Prerequisites
 
-- Rust 1.80+ ([Install Rust](https://www.rust-lang.org/tools/install))
+- **Rust 1.82+** ([Install Rust](https://www.rust-lang.org/tools/install))
+  - The project includes `rust-toolchain.toml` which will automatically use Rust 1.82
+  - If you don't have Rust 1.82, run: `rustup toolchain install 1.82`
 - FFmpeg installed and in PATH
 - FFprobe (comes with FFmpeg)
 
