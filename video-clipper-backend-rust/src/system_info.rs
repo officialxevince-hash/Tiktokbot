@@ -19,6 +19,7 @@ pub struct SystemInfo {
 #[derive(Debug)]
 pub struct MemoryUsage {
     pub rss_mb: f64,
+    #[allow(dead_code)]
     pub heap_mb: f64,
 }
 

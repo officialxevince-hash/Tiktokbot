@@ -84,6 +84,7 @@ pub async fn generate_clip(
 }
 
 /// Check if ffmpeg is available
+#[allow(dead_code)]
 pub async fn check_ffmpeg_available() -> Result<String> {
     let output = Command::new("ffmpeg")
         .arg("-version")
