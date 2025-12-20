@@ -1,5 +1,7 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, ScrollView, AppState, AppStateStatus, Image } from 'react-native';
+import { useState, useMemo, useRef, useEffect, useCallback, memo } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, ScrollView, AppState, AppStateStatus, InteractionManager } from 'react-native';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -26,10 +28,17 @@ export default function Results() {
   const videoPlayersRef = useRef<Map<string, any>>(new Map());
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const [visibleClips, setVisibleClips] = useState<Set<string>>(new Set());
+  const viewabilityUpdateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   
-  const clips: Clip[] = params.clips ? JSON.parse(params.clips as string) : [];
-  const videoId = params.videoId as string;
-  const metrics = params.metrics ? JSON.parse(params.metrics as string) : null;
+  // Memoize parsed clips to prevent re-parsing on every render
+  const clips = useMemo<Clip[]>(() => {
+    return params.clips ? JSON.parse(params.clips as string) : [];
+  }, [params.clips]);
+  
+  const videoId = useMemo(() => params.videoId as string, [params.videoId]);
+  const metrics = useMemo(() => {
+    return params.metrics ? JSON.parse(params.metrics as string) : null;
+  }, [params.metrics]);
   
   const totalDuration = useMemo(() => {
     return clips.reduce((sum, clip) => sum + clip.duration, 0);
@@ -60,23 +69,28 @@ export default function Results() {
 
     return () => {
       subscription.remove();
+      if (viewabilityUpdateTimeoutRef.current) {
+        clearTimeout(viewabilityUpdateTimeoutRef.current);
+      }
     };
   }, []);
 
-  const toggleSelection = (clipId: string) => {
-    const newSelected = new Set(selectedClips);
-    if (newSelected.has(clipId)) {
-      newSelected.delete(clipId);
-    } else {
-      newSelected.add(clipId);
-    }
-    setSelectedClips(newSelected);
-    if (newSelected.size === 0) {
-      setSelectionMode('none');
-    }
-  };
+  const toggleSelection = useCallback((clipId: string) => {
+    setSelectedClips(prev => {
+      const newSelected = new Set(prev);
+      if (newSelected.has(clipId)) {
+        newSelected.delete(clipId);
+      } else {
+        newSelected.add(clipId);
+      }
+      if (newSelected.size === 0) {
+        setSelectionMode('none');
+      }
+      return newSelected;
+    });
+  }, []);
 
-  const handlePreview = (clip: Clip) => {
+  const handlePreview = useCallback((clip: Clip) => {
     if (selectionMode === 'multiple') {
       toggleSelection(clip.id);
       return;
@@ -89,57 +103,21 @@ export default function Results() {
         videoId,
       },
     });
-  };
+  }, [selectionMode, toggleSelection, router, videoId]);
 
-  const handleSelectAll = () => {
-    if (selectedClips.size === clips.length) {
-      setSelectedClips(new Set());
-      setSelectionMode('none');
-    } else {
-      setSelectedClips(new Set(clips.map(c => c.id)));
-      setSelectionMode('multiple');
-    }
-  };
+  const handleSelectAll = useCallback(() => {
+    setSelectedClips(prev => {
+      if (prev.size === clips.length) {
+        setSelectionMode('none');
+        return new Set();
+      } else {
+        setSelectionMode('multiple');
+        return new Set(clips.map(c => c.id));
+      }
+    });
+  }, [clips]);
 
-  const handleBatchSave = async () => {
-    if (selectedClips.size === 0) {
-      Alert.alert('No Selection', 'Please select clips to save.');
-      return;
-    }
-
-    const clipsToSave = clips.filter(c => selectedClips.has(c.id));
-    let successCount = 0;
-    let failCount = 0;
-
-    Alert.alert(
-      'Save Multiple Clips',
-      `Save ${clipsToSave.length} selected clip${clipsToSave.length > 1 ? 's' : ''}?`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Save',
-          onPress: async () => {
-            for (const clip of clipsToSave) {
-              try {
-                await handleSave(clip, true);
-                successCount++;
-              } catch {
-                failCount++;
-              }
-            }
-            Alert.alert(
-              'Batch Save Complete',
-              `Saved: ${successCount}\nFailed: ${failCount}`
-            );
-            setSelectedClips(new Set());
-            setSelectionMode('none');
-          },
-        },
-      ]
-    );
-  };
-
-  const handleSave = async (clip: Clip, silent = false) => {
+  const handleSave = useCallback(async (clip: Clip, silent = false) => {
     const startTime = performance.now();
     try {
       setSaving(clip.id);
@@ -184,14 +162,77 @@ export default function Results() {
     } finally {
       setSaving(null);
     }
-  };
+  }, []);
 
-  const ClipVideoPreview = ({ videoUrl, thumbnailUrl, clipId, index, duration, isVisible }: { videoUrl: string; thumbnailUrl: string; clipId: string; index: number; duration: number; isVisible: boolean }) => {
+  const handleBatchSave = useCallback(async () => {
+    if (selectedClips.size === 0) {
+      Alert.alert('No Selection', 'Please select clips to save.');
+      return;
+    }
+
+    const clipsToSave = clips.filter(c => selectedClips.has(c.id));
+    let successCount = 0;
+    let failCount = 0;
+
+    Alert.alert(
+      'Save Multiple Clips',
+      `Save ${clipsToSave.length} selected clip${clipsToSave.length > 1 ? 's' : ''}?`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Save',
+          onPress: async () => {
+            for (const clip of clipsToSave) {
+              try {
+                await handleSave(clip, true);
+                successCount++;
+              } catch {
+                failCount++;
+              }
+            }
+            Alert.alert(
+              'Batch Save Complete',
+              `Saved: ${successCount}\nFailed: ${failCount}`
+            );
+            setSelectedClips(new Set());
+            setSelectionMode('none');
+          },
+        },
+      ]
+    );
+  }, [selectedClips, clips, handleSave]);
+
+  const handleCancelSelection = useCallback(() => {
+    setSelectionMode('none');
+    setSelectedClips(new Set());
+  }, []);
+
+  const handleStartSelection = useCallback(() => {
+    setSelectionMode('multiple');
+  }, []);
+
+  const ClipVideoPreview = memo(({ videoUrl, thumbnailUrl, clipId, index, duration, isVisible }: { videoUrl: string; thumbnailUrl: string; clipId: string; index: number; duration: number; isVisible: boolean }) => {
     const [isPlaying, setIsPlaying] = useState(false);
-    const [shouldLoad, setShouldLoad] = useState(isVisible);
+    const hasBeenVisibleRef = useRef(false);
+    // Only load first 2 items immediately, others wait until visible
+    const [shouldLoad, setShouldLoad] = useState(index < 2);
     const playerRef = useRef<any>(null);
+    const fullThumbnailUrl = useMemo(() => `${API_BASE_URL}${thumbnailUrl}`, [thumbnailUrl]);
     
-    // Only create player when visible or about to be visible
+    // Once visible, always stay loaded (prevent flicker on scroll)
+    // Use InteractionManager to defer loading during scroll
+    useEffect(() => {
+      if (isVisible && !hasBeenVisibleRef.current) {
+        hasBeenVisibleRef.current = true;
+        InteractionManager.runAfterInteractions(() => {
+          if (!shouldLoad) {
+            setShouldLoad(true);
+          }
+        });
+      }
+    }, [isVisible, shouldLoad]);
+    
+    // Only create player when should load
     const player = useVideoPlayer(shouldLoad ? videoUrl : '', (player) => {
       if (!shouldLoad) return;
       player.loop = APP_CONFIG.video.player.loop;
@@ -199,13 +240,6 @@ export default function Results() {
       playerRef.current = player;
       videoPlayersRef.current.set(clipId, player);
     });
-
-    // Lazy load: only load when visible
-    useEffect(() => {
-      if (isVisible && !shouldLoad) {
-        setShouldLoad(true);
-      }
-    }, [isVisible, shouldLoad, clipId]);
 
     // Listen to playing state changes
     useEffect(() => {
@@ -251,7 +285,7 @@ export default function Results() {
       };
     }, [player, duration, shouldLoad]);
 
-    const handlePlayPause = () => {
+    const handlePlayPause = useCallback(() => {
       try {
         if (!player) return;
         
@@ -266,9 +300,7 @@ export default function Results() {
       } catch (e) {
         // Player may have been disposed
       }
-    };
-
-    const fullThumbnailUrl = `${API_BASE_URL}${thumbnailUrl}`;
+    }, [player, isPlaying]);
     
     if (!shouldLoad) {
       // Placeholder while not visible - show thumbnail image
@@ -277,7 +309,11 @@ export default function Results() {
           <Image
             source={{ uri: fullThumbnailUrl }}
             style={styles.videoPreview}
-            resizeMode="cover"
+            contentFit="cover"
+            cachePolicy="memory-disk"
+            transition={0}
+            priority="normal"
+            recyclingKey={clipId}
           />
           <View style={styles.clipIndexBadge}>
             <Text style={styles.clipIndexText}>#{index + 1}</Text>
@@ -293,7 +329,11 @@ export default function Results() {
           <Image
             source={{ uri: fullThumbnailUrl }}
             style={styles.videoPreview}
-            resizeMode="cover"
+            contentFit="cover"
+            cachePolicy="memory-disk"
+            transition={0}
+            priority="normal"
+            recyclingKey={clipId}
           />
           <View style={styles.clipIndexBadge}>
             <Text style={styles.clipIndexText}>#{index + 1}</Text>
@@ -317,7 +357,11 @@ export default function Results() {
           <Image
             source={{ uri: fullThumbnailUrl }}
             style={styles.videoPreview}
-            resizeMode="cover"
+            contentFit="cover"
+            cachePolicy="memory-disk"
+            transition={0}
+            priority="normal"
+            recyclingKey={clipId}
           />
         )}
         <View style={styles.clipIndexBadge}>
@@ -341,21 +385,51 @@ export default function Results() {
         />
       </View>
     );
-  };
+  }, (prevProps, nextProps) => {
+    // Return true if props are equal (skip re-render), false if different (re-render)
+    // Don't re-render just because isVisible changes - once loaded, stay loaded
+    return (
+      prevProps.videoUrl === nextProps.videoUrl &&
+      prevProps.thumbnailUrl === nextProps.thumbnailUrl &&
+      prevProps.clipId === nextProps.clipId &&
+      prevProps.index === nextProps.index &&
+      prevProps.duration === nextProps.duration
+      // Intentionally not comparing isVisible to prevent re-renders on scroll
+    );
+  });
 
-  const renderClip = ({ item, index }: { item: Clip; index: number }) => {
+  // Memoize style arrays to prevent recreation - use stable style objects
+  const clipCardBaseStyle = styles.clipCard;
+  const clipCardSelectedStyle = styles.clipCardSelected;
+  const clipCardSavingStyle = styles.clipCardSaving;
+  const checkboxBaseStyle = styles.checkbox;
+  const checkboxSelectedStyle = styles.checkboxSelected;
+  const buttonBaseStyle = styles.button;
+  const previewButtonStyle = styles.previewButton;
+  const saveButtonBaseStyle = styles.saveButton;
+  const buttonDisabledStyle = styles.buttonDisabled;
+
+  const renderClip = useCallback(({ item, index }: { item: Clip; index: number }) => {
+    // Compute values (no hooks inside callbacks)
     const videoUrl = `${API_BASE_URL}${item.url}`;
-    const thumbnailUrl = item.thumbnail_url || item.url.replace('.mp4', '.jpg'); // Fallback if thumbnail_url not provided
+    const thumbnailUrl = item.thumbnail_url || item.url.replace('.mp4', '.jpg');
     const isSelected = selectedClips.has(item.id);
     const isSaving = saving === item.id;
+    const isVisible = visibleClips.has(item.id) || index < 2;
+    
+    // Create style arrays inline (React will handle optimization)
+    const clipCardStyle = [
+      clipCardBaseStyle,
+      isSelected && clipCardSelectedStyle,
+      isSaving && clipCardSavingStyle,
+    ];
+    const checkboxStyle = [checkboxBaseStyle, isSelected && checkboxSelectedStyle];
+    const buttonStyle = [buttonBaseStyle, previewButtonStyle, isSelected && buttonDisabledStyle];
+    const saveButtonStyle = [buttonBaseStyle, saveButtonBaseStyle, isSelected && buttonDisabledStyle];
     
     return (
       <TouchableOpacity
-        style={[
-          styles.clipCard,
-          isSelected && styles.clipCardSelected,
-          isSaving && styles.clipCardSaving,
-        ]}
+        style={clipCardStyle}
         onLongPress={() => {
           setSelectionMode('multiple');
           toggleSelection(item.id);
@@ -363,7 +437,7 @@ export default function Results() {
         activeOpacity={0.7}
       >
         {selectionMode === 'multiple' && (
-          <View style={[styles.checkbox, isSelected && styles.checkboxSelected]}>
+          <View style={checkboxStyle}>
             {isSelected && <Text style={styles.checkmark}>✓</Text>}
           </View>
         )}
@@ -374,7 +448,7 @@ export default function Results() {
           clipId={item.id}
           index={index}
           duration={item.duration}
-          isVisible={visibleClips.has(item.id) || index < 3}
+          isVisible={isVisible}
         />
         
         <View style={styles.clipInfo}>
@@ -392,14 +466,14 @@ export default function Results() {
         
         <View style={styles.actions}>
           <TouchableOpacity
-            style={[styles.button, styles.previewButton, isSelected && styles.buttonDisabled]}
+            style={buttonStyle}
             onPress={() => handlePreview(item)}
             disabled={isSaving}
           >
             <Text style={styles.buttonText}>Preview</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.button, styles.saveButton, isSelected && styles.buttonDisabled]}
+            style={saveButtonStyle}
             onPress={() => handleSave(item)}
             disabled={isSaving}
           >
@@ -412,7 +486,7 @@ export default function Results() {
         </View>
       </TouchableOpacity>
     );
-  };
+  }, [selectedClips, selectionMode, saving, visibleClips, toggleSelection, handlePreview, handleSave]);
 
   return (
     <>
@@ -450,10 +524,7 @@ export default function Results() {
                 )}
                 <TouchableOpacity
                   style={styles.headerButton}
-                  onPress={() => {
-                    setSelectionMode('none');
-                    setSelectedClips(new Set());
-                  }}
+                  onPress={handleCancelSelection}
                 >
                   <Text style={styles.headerButtonText}>Cancel</Text>
                 </TouchableOpacity>
@@ -461,7 +532,7 @@ export default function Results() {
             ) : (
               <TouchableOpacity
                 style={styles.headerButton}
-                onPress={() => setSelectionMode('multiple')}
+                onPress={handleStartSelection}
               >
                 <Text style={styles.headerButtonText}>Select</Text>
               </TouchableOpacity>
@@ -490,35 +561,39 @@ export default function Results() {
         )}
       </View>
 
-      <FlatList
+      <FlashList
         data={clips}
         renderItem={renderClip}
-        keyExtractor={(item) => item.id}
+        keyExtractor={useCallback((item: Clip) => item.id, [])}
         contentContainerStyle={styles.list}
-        removeClippedSubviews={APP_CONFIG.list.removeClippedSubviews}
-        maxToRenderPerBatch={APP_CONFIG.list.maxToRenderPerBatch}
-        windowSize={APP_CONFIG.list.windowSize}
-        initialNumToRender={APP_CONFIG.list.initialNumToRender}
-        updateCellsBatchingPeriod={APP_CONFIG.list.updateCellsBatchingPeriod}
-        getItemLayout={(data, index) => ({
-          length: APP_CONFIG.list.itemHeight,
-          offset: APP_CONFIG.list.itemHeight * index,
-          index,
-        })}
-        onViewableItemsChanged={({ viewableItems }) => {
-          // Update visible clips for lazy loading
-          const visibleIds = new Set(viewableItems.map(item => item.item.id));
-          setVisibleClips(visibleIds);
-        }}
-        viewabilityConfig={{
+        drawDistance={APP_CONFIG.list.drawDistance}
+        onViewableItemsChanged={useRef((info: any) => {
+          // Throttle viewability updates to prevent lag during scroll
+          if (viewabilityUpdateTimeoutRef.current) {
+            clearTimeout(viewabilityUpdateTimeoutRef.current);
+          }
+          viewabilityUpdateTimeoutRef.current = setTimeout(() => {
+            InteractionManager.runAfterInteractions(() => {
+              if (info?.viewableItems) {
+                const visibleIds = new Set<string>(info.viewableItems.map((item: any) => item.item?.id).filter(Boolean));
+                setVisibleClips(visibleIds);
+              }
+            });
+          }, 150);
+        }).current}
+        viewabilityConfig={useRef({
           itemVisiblePercentThreshold: APP_CONFIG.list.viewabilityThreshold,
           minimumViewTime: APP_CONFIG.list.minimumViewTime,
-        }}
-        ListEmptyComponent={
+          waitForInteraction: false,
+        }).current}
+        ListEmptyComponent={useMemo(() => (
           <View style={styles.emptyContainer}>
             <Text style={styles.emptyText}>No clips generated</Text>
           </View>
-        }
+        ), [])}
+        overrideItemLayout={(layout, item, index) => {
+          layout.span = APP_CONFIG.list.itemHeight;
+        }}
       />
       </SafeAreaView>
     </>

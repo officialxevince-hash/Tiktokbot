@@ -33,6 +33,7 @@ export interface AppConfig {
     itemHeight: number; // approximate height for getItemLayout
     viewabilityThreshold: number; // percentage (0-100)
     minimumViewTime: number; // milliseconds
+    drawDistance: number; // pixels to render outside viewport
   };
   processing: {
     progressUpdateInterval: number; // milliseconds
@@ -83,13 +84,14 @@ export const APP_CONFIG: AppConfig = {
   },
   list: {
     removeClippedSubviews: true,
-    maxToRenderPerBatch: 3,
-    windowSize: 5,
-    initialNumToRender: 2,
-    updateCellsBatchingPeriod: 50,
+    maxToRenderPerBatch: 2,
+    windowSize: 3,
+    initialNumToRender: 3,
+    updateCellsBatchingPeriod: 100,
     itemHeight: 320,
-    viewabilityThreshold: 50,
-    minimumViewTime: 100,
+    viewabilityThreshold: 80,
+    minimumViewTime: 500,
+    drawDistance: 250,
   },
   processing: {
     progressUpdateInterval: 100, // milliseconds
