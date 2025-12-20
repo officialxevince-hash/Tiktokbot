@@ -387,7 +387,9 @@ class ResourceManager:
         self.memory_threshold = float(os.getenv('RESOURCE_MEMORY_THRESHOLD', memory_threshold or 90.0))  # Increased from 80 to allow normal idle usage
         self.disk_threshold = float(os.getenv('RESOURCE_DISK_THRESHOLD', disk_threshold or 90.0))
         self.max_concurrent_operations = int(os.getenv('RESOURCE_MAX_CONCURRENT', max_concurrent_operations or 1))
-        self.video_processing_rate_limit = int(os.getenv('RESOURCE_RATE_LIMIT', video_processing_rate_limit or 1))  # Lowered from 2
+        # Default to 3 operations per hour for scheduled posting (was 1, too restrictive)
+        # This allows posting at multiple optimal times throughout the day
+        self.video_processing_rate_limit = int(os.getenv('RESOURCE_RATE_LIMIT', video_processing_rate_limit or 3))
         self.video_processing_window = float(os.getenv('RESOURCE_RATE_WINDOW', video_processing_window or 3600.0))
         
         # Initialize components
@@ -457,8 +459,17 @@ class ResourceManager:
             Result of function
         """
         # Check rate limiting
-        if not self.video_rate_limiter.wait_if_needed(max_wait=300.0):
-            raise RuntimeError("Rate limit exceeded. Too many operations.")
+        # For scheduled posts, allow waiting up to 30 minutes (or full window if shorter)
+        # This ensures scheduled posts aren't blocked by recent operations
+        max_wait_time = min(self.video_processing_window * 0.5, 1800.0)  # Max 30 minutes or half the window
+        if not self.video_rate_limiter.wait_if_needed(max_wait=max_wait_time):
+            # If we timed out waiting, check one more time if we can proceed now
+            # (operations may have aged out during the wait)
+            if not self.video_rate_limiter.can_proceed():
+                raise RuntimeError("Rate limit exceeded. Too many operations.")
+            # If we can proceed now, record the operation manually
+            with self.video_rate_limiter.lock:
+                self.video_rate_limiter.operations.append(time.time())
         
         # Wait for resources if needed
         if not self.check_resources():
