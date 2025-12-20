@@ -1,5 +1,6 @@
 # Build stage
-# Use Rust 1.82+ to support all dependencies (indexmap 2.12.1 requires 1.82)
+# Use Rust 1.82+ to ensure compatibility with all dependencies
+# indexmap 2.12.1 requires Rust 1.82+
 FROM rust:1.82 AS builder
 
 WORKDIR /app
@@ -9,6 +10,9 @@ COPY Cargo.toml Cargo.lock* ./
 
 # Copy source code
 COPY src ./src
+
+# Copy config file if it exists (optional)
+COPY config.toml* ./
 
 # Build release binary (Cargo will regenerate lockfile if needed)
 RUN cargo build --release
@@ -28,6 +32,9 @@ WORKDIR /app
 
 # Copy binary from builder
 COPY --from=builder /app/target/release/video-clipper-backend /usr/local/bin/
+
+# Copy config file if it exists (optional)
+COPY --from=builder /app/config.toml* ./
 
 # Set environment variables
 ENV UPLOAD_DIR=/app/uploads
