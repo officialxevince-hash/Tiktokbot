@@ -1,15 +1,16 @@
 # Build stage
-FROM rust:1.70 as builder
+FROM rust:1.70 AS builder
 
 WORKDIR /app
 
-# Copy manifest files
-COPY Cargo.toml Cargo.lock ./
+# Copy manifest files (Cargo.lock should be committed for binaries)
+COPY Cargo.toml Cargo.lock* ./
 
 # Copy source code
 COPY src ./src
 
-# Build release binary
+# Generate lockfile if it doesn't exist, then build release binary
+RUN if [ ! -f Cargo.lock ]; then cargo generate-lockfile; fi
 RUN cargo build --release
 
 # Runtime stage
