@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity } from 'react-native';
+import { useState, useEffect, useRef } from 'react';
+import { View, Text, StyleSheet, ActivityIndicator, TouchableOpacity, Animated } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { uploadVideo, generateClips } from '../utils/api';
@@ -10,6 +10,8 @@ interface ProcessingState {
   status: string;
   details?: string;
   timeElapsed?: number;
+  clipsGenerated?: number;
+  totalClips?: number;
 }
 
 export default function Processing() {
@@ -27,13 +29,113 @@ export default function Processing() {
     totalTime?: number;
     clipCount?: number;
   }>({});
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const progressAnim = useRef(new Animated.Value(0)).current;
+  const intervalRef = useRef<NodeJS.Timeout | null>(null);
+  const elapsedIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     processVideo();
+    
+    // Start elapsed time counter
+    elapsedIntervalRef.current = setInterval(() => {
+      setElapsedTime(prev => prev + 0.1);
+    }, 100);
+    
+    return () => {
+      if (intervalRef.current) clearInterval(intervalRef.current);
+      if (elapsedIntervalRef.current) clearInterval(elapsedIntervalRef.current);
+    };
   }, []);
+
+  // Animate progress bar smoothly
+  useEffect(() => {
+    Animated.timing(progressAnim, {
+      toValue: state.progress,
+      duration: 300,
+      useNativeDriver: false,
+    }).start();
+  }, [state.progress]);
+
+  const simulateUploadProgress = () => {
+    let currentProgress = 0;
+    const statusMessages = [
+      'Preparing video...',
+      'Uploading to server...',
+      'Transferring data...',
+      'Finalizing upload...',
+    ];
+    let messageIndex = 0;
+    
+    intervalRef.current = setInterval(() => {
+      currentProgress += Math.random() * 2.5 + 1.5; // 1.5-4% per update
+      if (currentProgress >= 45) {
+        currentProgress = 45; // Cap at 45% during upload
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+      }
+      
+      // Update status message based on progress
+      const newMessageIndex = Math.floor((currentProgress / 45) * statusMessages.length);
+      if (newMessageIndex !== messageIndex && newMessageIndex < statusMessages.length) {
+        messageIndex = newMessageIndex;
+      }
+      
+      setState(prev => ({
+        ...prev,
+        progress: Math.min(currentProgress, 45),
+        details: statusMessages[messageIndex],
+      }));
+    }, 150); // Update every 150ms for faster feel
+  };
+
+  const simulateClipProgress = (totalClips: number) => {
+    let currentProgress = 50;
+    let clipsGenerated = 0;
+    const statusMessages = [
+      'Analyzing video content...',
+      'Detecting scene changes...',
+      'Generating clips...',
+      'Processing segments...',
+      'Optimizing clips...',
+    ];
+    let messageIndex = 0;
+    
+    intervalRef.current = setInterval(() => {
+      clipsGenerated += 1;
+      currentProgress = 50 + (clipsGenerated / totalClips) * 45; // 50% to 95%
+      
+      // Rotate status messages
+      if (clipsGenerated % 2 === 0) {
+        messageIndex = (messageIndex + 1) % statusMessages.length;
+      }
+      
+      if (clipsGenerated >= totalClips) {
+        currentProgress = 95;
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+        }
+      }
+      
+      setState(prev => ({
+        ...prev,
+        progress: Math.min(currentProgress, 95),
+        clipsGenerated,
+        totalClips,
+        details: clipsGenerated < totalClips 
+          ? `${statusMessages[messageIndex]} (${clipsGenerated}/${totalClips})`
+          : 'Finalizing clips...',
+      }));
+    }, 400); // Update every 400ms for faster feel
+  };
 
   const processVideo = async () => {
     const totalStartTime = performance.now();
+    setElapsedTime(0);
+    
     try {
       console.log(`[Processing] ⏱️  START - ${new Date().toISOString()}`);
       console.log('[Processing] Params:', JSON.stringify(params, null, 2));
@@ -48,13 +150,15 @@ export default function Processing() {
       console.log('[Processing] Video URI:', uri);
       console.log('[Processing] File name:', fileName);
 
-      // Upload phase
+      // Upload phase with simulated progress
       setState({
         phase: 'upload',
         progress: 0,
         status: 'Uploading video...',
-        details: 'Transferring to server',
+        details: 'Preparing upload...',
       });
+      
+      simulateUploadProgress();
       
       const uploadStart = performance.now();
       console.log('[Processing] Calling uploadVideo...');
@@ -63,22 +167,40 @@ export default function Processing() {
       console.log(`[Processing] ✓ Upload completed in ${uploadTime}s`);
       console.log('[Processing] Video ID:', videoId);
       
+      // Clear upload interval
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      
       setMetrics(prev => ({ ...prev, uploadTime }));
       setState({
         phase: 'clipping',
         progress: 50,
         status: 'Generating clips...',
-        details: 'Processing video segments',
+        details: 'Analyzing video...',
         timeElapsed: uploadTime,
       });
       
-      // Clipping phase
+      // Clipping phase with simulated progress
       const clipsStart = performance.now();
       console.log('[Processing] Calling generateClips...');
+      
+      // Estimate clip count based on video duration (if available)
+      const duration = params.duration ? parseFloat(params.duration as string) : 180;
+      const estimatedClips = Math.ceil(duration / 15);
+      simulateClipProgress(estimatedClips);
+      
       const clips = await generateClips(videoId, 15);
       const clipsTime = parseFloat(((performance.now() - clipsStart) / 1000).toFixed(2));
       console.log(`[Processing] ✓ Clips generated in ${clipsTime}s`);
       console.log('[Processing] Total clips:', clips.length);
+      
+      // Clear clip interval
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
       
       const totalTime = parseFloat(((performance.now() - totalStartTime) / 1000).toFixed(2));
       setMetrics({
@@ -94,6 +216,8 @@ export default function Processing() {
         status: 'Complete!',
         details: `${clips.length} clips generated`,
         timeElapsed: totalTime,
+        clipsGenerated: clips.length,
+        totalClips: clips.length,
       });
       
       // Small delay to show completion, then navigate
@@ -107,8 +231,14 @@ export default function Processing() {
             metrics: JSON.stringify({ uploadTime, clipTime: clipsTime, totalTime }),
           },
         });
-      }, 500);
+      }, 800);
     } catch (err) {
+      // Clear intervals on error
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      
       const totalTime = ((performance.now() - totalStartTime) / 1000).toFixed(3);
       console.error(`[Processing] ❌ ERROR after ${totalTime}s:`, err);
       console.error('[Processing] Error type:', err?.constructor?.name);
@@ -159,10 +289,32 @@ export default function Processing() {
         {/* Progress Bar */}
         <View style={styles.progressContainer}>
           <View style={styles.progressBar}>
-            <View style={[styles.progressFill, { width: `${state.progress}%` }]} />
+            <Animated.View 
+              style={[
+                styles.progressFill, 
+                { 
+                  width: progressAnim.interpolate({
+                    inputRange: [0, 100],
+                    outputRange: ['0%', '100%'],
+                  })
+                }
+              ]} 
+            />
           </View>
-          <Text style={styles.progressText}>{Math.round(state.progress)}%</Text>
+          <View style={styles.progressInfo}>
+            <Text style={styles.progressText}>{Math.round(state.progress)}%</Text>
+            {state.clipsGenerated !== undefined && state.totalClips !== undefined && (
+              <Text style={styles.clipCountText}>
+                {state.clipsGenerated}/{state.totalClips} clips
+              </Text>
+            )}
+          </View>
         </View>
+
+        {/* Elapsed Time */}
+        <Text style={styles.elapsedTime}>
+          {elapsedTime.toFixed(1)}s elapsed
+        </Text>
 
         {/* Metrics */}
         {metrics.uploadTime && (
@@ -228,26 +380,41 @@ const styles = StyleSheet.create({
   },
   progressContainer: {
     width: '100%',
-    marginBottom: 30,
+    marginBottom: 20,
   },
   progressBar: {
     width: '100%',
-    height: 8,
+    height: 10,
     backgroundColor: '#E5E5E5',
-    borderRadius: 4,
+    borderRadius: 5,
     overflow: 'hidden',
     marginBottom: 8,
   },
   progressFill: {
     height: '100%',
     backgroundColor: '#007AFF',
-    borderRadius: 4,
+    borderRadius: 5,
+  },
+  progressInfo: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
   },
   progressText: {
     fontSize: 14,
     color: '#666',
-    textAlign: 'center',
     fontWeight: '600',
+  },
+  clipCountText: {
+    fontSize: 12,
+    color: '#999',
+    fontWeight: '500',
+  },
+  elapsedTime: {
+    fontSize: 12,
+    color: '#999',
+    marginBottom: 20,
+    fontWeight: '500',
   },
   metricsContainer: {
     flexDirection: 'row',
