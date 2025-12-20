@@ -30,8 +30,11 @@ pub async fn upload_handler(
     // Find the file field
     let mut file_data: Option<(String, Vec<u8>)> = None;
 
+    info!("[POST /upload] Starting multipart parsing...");
+
     while let Some(field) = multipart.next_field().await.map_err(|e| {
-        error!("Multipart parsing error: {}", e);
+        error!("[POST /upload] Multipart parsing error: {}", e);
+        error!("[POST /upload] Error details: {:?}", e);
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -40,6 +43,8 @@ pub async fn upload_handler(
         )
     })? {
         let name = field.name().unwrap_or("").to_string();
+        info!("[POST /upload] Processing field: '{}'", name);
+        
         if name == "file" {
             // Validate content type
             if let Some(content_type) = field.content_type() {

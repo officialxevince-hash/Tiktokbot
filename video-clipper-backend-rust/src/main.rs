@@ -1,4 +1,5 @@
 use axum::{
+    extract::DefaultBodyLimit,
     routing::post,
     Router,
 };
@@ -48,10 +49,15 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Build router
+    // Set body size limit to 500MB (matching max_file_size config)
+    // This is required for Axum's Multipart extractor to handle large files
+    let max_body_size = config.max_file_size;
+    
     let app = Router::new()
         .route("/upload", post(upload_handler))
         .route("/clip", post(clip_handler))
         .nest_service("/clips", ServeDir::new(&config.output_dir))
+        .layer(DefaultBodyLimit::max(max_body_size as usize))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(app_state);
