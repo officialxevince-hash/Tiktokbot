@@ -1,16 +1,16 @@
 # Build stage
-FROM rust:1.70 AS builder
+# Use Rust 1.78+ to support Cargo.lock version 4
+FROM rust:1.78 AS builder
 
 WORKDIR /app
 
-# Copy manifest files (Cargo.lock should be committed for binaries)
+# Copy manifest files (Cargo.lock optional - will be regenerated if incompatible)
 COPY Cargo.toml Cargo.lock* ./
 
 # Copy source code
 COPY src ./src
 
-# Generate lockfile if it doesn't exist, then build release binary
-RUN if [ ! -f Cargo.lock ]; then cargo generate-lockfile; fi
+# Build release binary (Cargo will regenerate lockfile if needed)
 RUN cargo build --release
 
 # Runtime stage
