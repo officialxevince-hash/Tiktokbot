@@ -2,6 +2,16 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
 import { API_BASE_URL, APP_CONFIG } from './config';
 
+// Helper to get the API URL - use API routes on web, direct backend on native
+const getApiEndpoint = (path: string): string => {
+  if (Platform.OS === 'web') {
+    // On web, use API routes to avoid CORS issues
+    return `/api${path}`;
+  }
+  // On native, use direct backend URL
+  return `${API_BASE_URL}${path}`;
+};
+
 // Cache for File objects on web (since they can't be serialized in router params)
 const fileCache = new Map<string, File | Blob>();
 
@@ -152,8 +162,9 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
       } as any);
     }
 
-    const uploadUrl = `${API_BASE_URL}/upload`;
+    const uploadUrl = getApiEndpoint('/upload');
     console.log('[uploadVideo] Upload URL:', uploadUrl);
+    console.log('[uploadVideo] Using API route:', Platform.OS === 'web');
     
     const uploadStart = performance.now();
     console.log(`[uploadVideo] Making fetch request with ${APP_CONFIG.api.timeout.upload / 1000 / 60} minute timeout...`);
@@ -213,8 +224,9 @@ export async function generateClips(videoId: string, maxLength: number = 15): Pr
   console.log('[generateClips] API_BASE_URL:', API_BASE_URL);
   
   try {
-    const clipUrl = `${API_BASE_URL}/clip`;
+    const clipUrl = getApiEndpoint('/clip');
     console.log('[generateClips] Clip URL:', clipUrl);
+    console.log('[generateClips] Using API route:', Platform.OS === 'web');
     
     // Backend expects snake_case: video_id and max_length
     const requestBody = {
@@ -279,8 +291,9 @@ export async function getConfig(): Promise<BackendConfig> {
   console.log('[getConfig] API_BASE_URL:', API_BASE_URL);
   
   try {
-    const configUrl = `${API_BASE_URL}/config`;
+    const configUrl = getApiEndpoint('/config');
     console.log('[getConfig] Config URL:', configUrl);
+    console.log('[getConfig] Using API route:', Platform.OS === 'web');
     
     const response = await fetchWithTimeout(
       configUrl,

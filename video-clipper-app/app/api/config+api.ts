@@ -3,7 +3,8 @@
 // This proxies requests to the backend or can be used as a serverless function
 export async function GET(request: Request): Promise<Response> {
   try {
-    const apiUrl = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:3000';
+    // Use environment variable or default to production backend
+    const apiUrl = process.env.EXPO_PUBLIC_API_URL || 'https://tiktokbot-rust.onrender.com';
     const backendUrl = `${apiUrl}/config`;
 
     const response = await fetch(backendUrl, {
