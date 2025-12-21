@@ -42,9 +42,10 @@ crf = 20
 # high = best quality and compression efficiency
 profile = "high"
 
-# H.264 level (3.0, 3.1, 4.0, etc.)
-# 4.0 allows higher resolution and bitrate for better quality
-level = "4.0"
+# H.264 level (3.0, 3.1, 4.0, 4.1, 4.2, 5.0, 5.1, 5.2, etc.)
+# 5.1 supports 4K video (up to 4096x2304) and high bitrates
+# Required for 4K iPhone videos (3840x2160 or 2160x3840)
+level = "5.1"
 
 # Number of threads per clip encoding
 # Set to 0 to auto-detect (half of CPU count, max 4)

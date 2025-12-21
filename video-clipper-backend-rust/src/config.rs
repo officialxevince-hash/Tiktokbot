@@ -237,7 +237,7 @@ impl Config {
                 preset: "medium".to_string(), // Good balance of quality and speed
                 crf: 20, // High quality (lower is better, 18-23 range recommended)
                 profile: "high".to_string(), // Best quality profile
-                level: "4.0".to_string(), // Higher level for better quality
+                level: "5.1".to_string(), // Level 5.1 supports 4K video (required for iPhone 4K)
                 threads_per_clip: None,
                 pixel_format: "yuv420p".to_string(),
                 tune: vec![], // No tune for better quality (removed fastdecode/zerolatency)
@@ -353,7 +353,7 @@ impl Default for Config {
                 preset: "medium".to_string(), // Good balance of quality and speed
                 crf: 20, // High quality (lower is better, 18-23 range recommended)
                 profile: "high".to_string(), // Best quality profile
-                level: "4.0".to_string(), // Higher level for better quality
+                level: "5.1".to_string(), // Level 5.1 supports 4K video (required for iPhone 4K)
                 threads_per_clip: None,
                 pixel_format: "yuv420p".to_string(),
                 tune: vec![], // No tune for better quality (removed fastdecode/zerolatency)
