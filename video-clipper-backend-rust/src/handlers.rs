@@ -359,11 +359,13 @@ pub async fn clip_handler(
             
             let mut found_file: Option<PathBuf> = None;
             let mut dir_entries = entries;
+            let mut checked_files = Vec::new();
             loop {
                 match dir_entries.next_entry().await {
                     Ok(Some(entry)) => {
                         let path = entry.path();
                         if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                            checked_files.push(file_name.to_string());
                             if file_name.starts_with(&request.video_id) {
                                 found_file = Some(path);
                                 break;
@@ -381,6 +383,12 @@ pub async fn clip_handler(
                         ));
                     }
                 }
+            }
+            
+            if found_file.is_none() {
+                warn!("[POST /clip] Video file not found. Searched for files starting with: {}. Found {} files in directory: {:?}", 
+                    request.video_id, checked_files.len(), 
+                    if checked_files.len() <= 10 { checked_files } else { checked_files[..10].to_vec() });
             }
             
             if let Some(file_path) = found_file {

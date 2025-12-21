@@ -46,12 +46,29 @@ async fn detect_hardware_codec_impl() -> Option<String> {
     );
 
     // Check for hardware encoders in order of preference
+    // For NVENC, verify CUDA is actually available (not just that encoder exists)
     if encoders_output.contains("h264_videotoolbox") {
         info!("[ffmpeg] ✅ Hardware acceleration detected: VideoToolbox (macOS)");
         Some("h264_videotoolbox".to_string())
     } else if encoders_output.contains("h264_nvenc") {
-        info!("[ffmpeg] ✅ Hardware acceleration detected: NVENC (NVIDIA)");
-        Some("h264_nvenc".to_string())
+        // Verify NVENC actually works - check if CUDA libraries are available
+        // NVENC requires libcuda.so.1 which may not be available on all systems (e.g., Fly.io)
+        use std::path::Path;
+        let cuda_paths = [
+            "/usr/lib/x86_64-linux-gnu/libcuda.so.1",
+            "/usr/local/cuda/lib64/libcuda.so.1",
+            "/lib/x86_64-linux-gnu/libcuda.so.1",
+        ];
+        
+        let cuda_available = cuda_paths.iter().any(|path| Path::new(path).exists());
+        
+        if cuda_available {
+            info!("[ffmpeg] ✅ Hardware acceleration detected: NVENC (NVIDIA)");
+            Some("h264_nvenc".to_string())
+        } else {
+            warn!("[ffmpeg] ⚠️  NVENC encoder found but CUDA libraries not available, falling back to CPU");
+            None
+        }
     } else if encoders_output.contains("h264_qsv") {
         info!("[ffmpeg] ✅ Hardware acceleration detected: Quick Sync Video (Intel)");
         Some("h264_qsv".to_string())
