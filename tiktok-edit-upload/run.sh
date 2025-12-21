@@ -33,6 +33,15 @@ if ! command -v bun &> /dev/null; then
     if command -v curl &> /dev/null; then
         curl -fsSL https://bun.sh/install | bash
         export PATH="$HOME/.bun/bin:$PATH"
+        
+        # Verify bun is now available
+        if ! command -v bun &> /dev/null; then
+            echo -e "${RED}[-] Error: bun installation failed or not in PATH${NC}"
+            echo -e "${YELLOW}[!] Please add bun to your PATH or restart your terminal${NC}"
+            echo -e "${YELLOW}[!] Or install manually: https://bun.sh${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}[+] bun installed successfully${NC}"
     else
         echo -e "${RED}[-] Error: curl is not available. Please install bun manually:${NC}"
         echo -e "${YELLOW}    Visit: https://bun.sh${NC}"
@@ -90,50 +99,27 @@ fi
 
 cd "$SIGNATURE_DIR"
 
-# Try to find npm in common locations
-NPM_CMD=""
-if command -v npm &> /dev/null; then
-    NPM_CMD="npm"
-elif [ -f "/opt/homebrew/bin/npm" ]; then
-    NPM_CMD="/opt/homebrew/bin/npm"
-elif [ -f "/usr/local/bin/npm" ]; then
-    NPM_CMD="/usr/local/bin/npm"
+# Install dependencies with bun
+echo -e "${GREEN}[+] Installing dependencies with bun...${NC}"
+bun install
+
+# Verify Playwright package is installed
+if [ ! -d "node_modules/playwright-chromium" ]; then
+    echo -e "${RED}[-] Error: Playwright package installation failed${NC}"
+    echo -e "${YELLOW}[!] Please check the error messages above${NC}"
+    exit 1
 fi
 
-# Install dependencies - prefer npm for Playwright compatibility
-if [ -n "$NPM_CMD" ]; then
-    echo -e "${GREEN}[+] Installing dependencies with npm (required for Playwright)...${NC}"
-    $NPM_CMD install
+# Install Playwright browser binaries
+echo -e "${GREEN}[+] Installing Playwright browser binaries...${NC}"
+# Try multiple methods to install browser binaries
+if [ -f "node_modules/.bin/playwright" ]; then
+    bun run node_modules/.bin/playwright install chromium
 else
-    echo -e "${YELLOW}[!] npm not found in PATH, trying bun...${NC}"
-    echo -e "${YELLOW}[!] Note: Playwright may not install correctly with bun${NC}"
-    bun install
-    
-    # Verify Playwright installation - if incomplete, try to fix it
-    if [ ! -d "node_modules/playwright-core/lib" ]; then
-        echo -e "${YELLOW}[!] Playwright installation incomplete with bun, attempting to fix...${NC}"
-        
-        # Try to find npm again (might be in PATH now after bun install)
-        if command -v npm &> /dev/null 2>&1; then
-            echo -e "${GREEN}[+] Found npm, reinstalling Playwright...${NC}"
-            npm install playwright-chromium --save
-        elif [ -f "/opt/homebrew/bin/npm" ]; then
-            echo -e "${GREEN}[+] Found npm at /opt/homebrew/bin/npm, reinstalling Playwright...${NC}"
-            /opt/homebrew/bin/npm install playwright-chromium --save
-        else
-            echo -e "${RED}[-] Error: Playwright installation incomplete and npm not available${NC}"
-            echo -e "${YELLOW}[!] Please install npm: brew install node (includes npm)${NC}"
-            echo -e "${YELLOW}[!] Or manually run: cd $SIGNATURE_DIR && npm install${NC}"
-            exit 1
-        fi
-        
-        # Verify again
-        if [ ! -d "node_modules/playwright-core/lib" ]; then
-            echo -e "${RED}[-] Error: Playwright installation still incomplete${NC}"
-            echo -e "${YELLOW}[!] Please manually run: cd $SIGNATURE_DIR && npm install${NC}"
-            exit 1
-        fi
-    fi
+    # Use bunx (bun's equivalent of npx)
+    bunx --bun playwright install chromium || \
+    bunx playwright install chromium || \
+    bun run node_modules/playwright-chromium/cli.js install chromium
 fi
 
 cd "$SCRIPT_DIR"
