@@ -549,6 +549,12 @@ export default function Results() {
             </Text>
           </View>
           <View style={styles.headerActions}>
+            <TouchableOpacity
+              style={styles.backButton}
+              onPress={() => router.push('/')}
+            >
+              <Text style={styles.backButtonText}>Home</Text>
+            </TouchableOpacity>
             {selectionMode === 'multiple' ? (
               <>
                 <TouchableOpacity
@@ -679,6 +685,19 @@ const styles = StyleSheet.create({
   headerActions: {
     flexDirection: 'row',
     gap: 8,
+    alignItems: 'center',
+  },
+  backButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    backgroundColor: '#F0F0F0',
+    marginRight: 8,
+  },
+  backButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#007AFF',
   },
   headerButton: {
     paddingHorizontal: 16,
