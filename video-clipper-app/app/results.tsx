@@ -8,6 +8,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import * as MediaLibrary from 'expo-media-library';
 import * as FileSystem from 'expo-file-system/legacy';
+import { Platform } from 'react-native';
 import { API_BASE_URL, APP_CONFIG } from '../utils/config';
 
 interface Clip {
@@ -122,38 +123,67 @@ export default function Results() {
     try {
       setSaving(clip.id);
       console.log(`[Save] ⏱️  START saving ${clip.id} - ${new Date().toISOString()}`);
+      console.log(`[Save] Platform: ${Platform.OS}`);
 
-      // Request permissions
-      const permStart = performance.now();
-      const { status } = await MediaLibrary.requestPermissionsAsync();
-      const permTime = ((performance.now() - permStart) / 1000).toFixed(3);
-      console.log(`[Save] Permission check: ${status} (${permTime}s)`);
-      
-      if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Please grant media library access to save clips.');
-        setSaving(null);
-        return;
-      }
-
-      // Download clip
       const clipUrl = `${API_BASE_URL}${clip.url}`;
-      const fileUri = FileSystem.documentDirectory + `${clip.id}.mp4`;
-      
-      console.log(`[Save] Downloading from: ${clipUrl}`);
-      const downloadStart = performance.now();
-      const downloadResult = await FileSystem.downloadAsync(clipUrl, fileUri);
-      const downloadTime = ((performance.now() - downloadStart) / 1000).toFixed(3);
-      console.log(`[Save] ✓ Download completed in ${downloadTime}s`);
-      
-      // Save to media library
-      const saveStart = performance.now();
-      await MediaLibrary.createAssetAsync(downloadResult.uri);
-      const saveTime = ((performance.now() - saveStart) / 1000).toFixed(3);
-      const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
-      console.log(`[Save] ✅ SUCCESS - Total time: ${totalTime}s (save: ${saveTime}s)`);
-      
-      if (!silent) {
-        Alert.alert('Success', 'Clip saved to your device!');
+
+      if (Platform.OS === 'web') {
+        // Web: Trigger browser download
+        console.log(`[Save] Web platform - triggering download from: ${clipUrl}`);
+        const downloadStart = performance.now();
+        
+        if (typeof document !== 'undefined') {
+          const link = document.createElement('a');
+          link.href = clipUrl;
+          link.download = `${clip.id}.mp4`;
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+        } else {
+          // Fallback: open in new window
+          window.open(clipUrl, '_blank');
+        }
+        
+        const downloadTime = ((performance.now() - downloadStart) / 1000).toFixed(3);
+        const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
+        console.log(`[Save] ✅ SUCCESS - Total time: ${totalTime}s (download: ${downloadTime}s)`);
+        
+        if (!silent) {
+          Alert.alert('Success', 'Clip download started!');
+        }
+      } else {
+        // Native: Use FileSystem and MediaLibrary
+        // Request permissions
+        const permStart = performance.now();
+        const { status } = await MediaLibrary.requestPermissionsAsync();
+        const permTime = ((performance.now() - permStart) / 1000).toFixed(3);
+        console.log(`[Save] Permission check: ${status} (${permTime}s)`);
+        
+        if (status !== 'granted') {
+          Alert.alert('Permission Required', 'Please grant media library access to save clips.');
+          setSaving(null);
+          return;
+        }
+
+        // Download clip
+        const fileUri = FileSystem.documentDirectory + `${clip.id}.mp4`;
+        
+        console.log(`[Save] Downloading from: ${clipUrl}`);
+        const downloadStart = performance.now();
+        const downloadResult = await FileSystem.downloadAsync(clipUrl, fileUri);
+        const downloadTime = ((performance.now() - downloadStart) / 1000).toFixed(3);
+        console.log(`[Save] ✓ Download completed in ${downloadTime}s`);
+        
+        // Save to media library
+        const saveStart = performance.now();
+        await MediaLibrary.createAssetAsync(downloadResult.uri);
+        const saveTime = ((performance.now() - saveStart) / 1000).toFixed(3);
+        const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
+        console.log(`[Save] ✅ SUCCESS - Total time: ${totalTime}s (save: ${saveTime}s)`);
+        
+        if (!silent) {
+          Alert.alert('Success', 'Clip saved to your device!');
+        }
       }
     } catch (error) {
       const totalTime = ((performance.now() - startTime) / 1000).toFixed(3);
@@ -217,7 +247,21 @@ export default function Results() {
     // Only load first 2 items immediately, others wait until visible
     const [shouldLoad, setShouldLoad] = useState(index < 2);
     const playerRef = useRef<any>(null);
-    const fullThumbnailUrl = useMemo(() => `${API_BASE_URL}${thumbnailUrl}`, [thumbnailUrl]);
+    // Ensure absolute URLs for web compatibility
+    const fullThumbnailUrl = useMemo(() => {
+      if (thumbnailUrl.startsWith('http://') || thumbnailUrl.startsWith('https://')) {
+        return thumbnailUrl;
+      }
+      return `${API_BASE_URL}${thumbnailUrl}`;
+    }, [thumbnailUrl]);
+    
+    // Ensure video URL is absolute for web
+    const fullVideoUrl = useMemo(() => {
+      if (videoUrl.startsWith('http://') || videoUrl.startsWith('https://')) {
+        return videoUrl;
+      }
+      return `${API_BASE_URL}${videoUrl}`;
+    }, [videoUrl]);
     
     // Once visible, always stay loaded (prevent flicker on scroll)
     // Use InteractionManager to defer loading during scroll
@@ -233,7 +277,7 @@ export default function Results() {
     }, [isVisible, shouldLoad]);
     
     // Only create player when should load
-    const player = useVideoPlayer(shouldLoad ? videoUrl : '', (player) => {
+    const player = useVideoPlayer(shouldLoad ? fullVideoUrl : '', (player) => {
       if (!shouldLoad) return;
       player.loop = APP_CONFIG.video.player.loop;
       player.muted = APP_CONFIG.video.player.muted;
@@ -411,7 +455,10 @@ export default function Results() {
 
   const renderClip = useCallback(({ item, index }: { item: Clip; index: number }) => {
     // Compute values (no hooks inside callbacks)
-    const videoUrl = `${API_BASE_URL}${item.url}`;
+    // Ensure absolute URLs for web compatibility
+    const videoUrl = item.url.startsWith('http://') || item.url.startsWith('https://')
+      ? item.url
+      : `${API_BASE_URL}${item.url}`;
     const thumbnailUrl = item.thumbnail_url || item.url.replace('.mp4', '.jpg');
     const isSelected = selectedClips.has(item.id);
     const isSaving = saving === item.id;

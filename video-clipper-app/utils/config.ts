@@ -43,12 +43,12 @@ export interface AppConfig {
 }
 
 // Use local network IP for device access, localhost for simulator/web
-// For physical devices, use your local IP: http://192.168.40.29:3000
+// For physical devices, use your local IP: http://192.168.40.29:3000 or https://tiktokbot-rust.onrender.com
 // For simulator/web, localhost works fine
 // Update this IP if your network changes
 const getApiUrl = () => {
   const envUrl = process.env.EXPO_PUBLIC_API_URL;
-  const defaultUrl = __DEV__ ? 'http://192.168.40.29:3000' : 'http://localhost:3000';
+  const defaultUrl = __DEV__ ? 'https://tiktokbot-rust.onrender.com' : 'http://localhost:3000';
   const finalUrl = envUrl || defaultUrl;
   
   console.log('[API Config] EXPO_PUBLIC_API_URL:', envUrl);

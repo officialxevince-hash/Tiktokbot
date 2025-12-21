@@ -1,4 +1,5 @@
 import * as FileSystem from 'expo-file-system/legacy';
+import { Platform } from 'react-native';
 import { API_BASE_URL, APP_CONFIG } from './config';
 
 export interface Clip {
@@ -66,19 +67,6 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
   const formData = new FormData();
   
   try {
-    // Get file info
-    const fileInfoStart = performance.now();
-    console.log('[uploadVideo] Getting file info...');
-    const fileInfo = await FileSystem.getInfoAsync(uri);
-    const fileInfoTime = ((performance.now() - fileInfoStart) / 1000).toFixed(3);
-    console.log(`[uploadVideo] ✓ File info retrieved in ${fileInfoTime}s`);
-    console.log('[uploadVideo] File info:', JSON.stringify(fileInfo, null, 2));
-    
-    if (!fileInfo.exists) {
-      console.error('[uploadVideo] File does not exist!');
-      throw new Error('Video file not found');
-    }
-
     // Determine file type from extension
     const extension = fileName.split('.').pop()?.toLowerCase();
     const mimeType = extension === 'mov' ? 'video/quicktime' : 
@@ -86,13 +74,46 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
                      'video/mp4'; // Default
     
     console.log('[uploadVideo] MIME type:', mimeType);
+    console.log('[uploadVideo] Platform:', Platform.OS);
     
-    // React Native FormData format
-    formData.append('file', {
-      uri: fileInfo.uri,
-      type: mimeType,
-      name: fileName,
-    } as any);
+    // Handle web vs native platforms differently
+    if (Platform.OS === 'web') {
+      // Web: Fetch the file as a Blob and append directly
+      console.log('[uploadVideo] Web platform - fetching file as Blob...');
+      const fileInfoStart = performance.now();
+      
+      const response = await fetch(uri);
+      if (!response.ok) {
+        throw new Error('Failed to fetch video file');
+      }
+      
+      const blob = await response.blob();
+      const fileInfoTime = ((performance.now() - fileInfoStart) / 1000).toFixed(3);
+      console.log(`[uploadVideo] ✓ File fetched in ${fileInfoTime}s`);
+      
+      // Append Blob directly to FormData (web format)
+      formData.append('file', blob, fileName);
+    } else {
+      // Native: Use FileSystem to get file info
+      const fileInfoStart = performance.now();
+      console.log('[uploadVideo] Getting file info...');
+      const fileInfo = await FileSystem.getInfoAsync(uri);
+      const fileInfoTime = ((performance.now() - fileInfoStart) / 1000).toFixed(3);
+      console.log(`[uploadVideo] ✓ File info retrieved in ${fileInfoTime}s`);
+      console.log('[uploadVideo] File info:', JSON.stringify(fileInfo, null, 2));
+      
+      if (!fileInfo.exists) {
+        console.error('[uploadVideo] File does not exist!');
+        throw new Error('Video file not found');
+      }
+      
+      // React Native FormData format
+      formData.append('file', {
+        uri: fileInfo.uri,
+        type: mimeType,
+        name: fileName,
+      } as any);
+    }
 
     const uploadUrl = `${API_BASE_URL}/upload`;
     console.log('[uploadVideo] Upload URL:', uploadUrl);

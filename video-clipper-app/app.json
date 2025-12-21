@@ -13,6 +13,7 @@
     },
     "ios": {
       "supportsTablet": true,
+      "bundleIdentifier": "com.videoclipper.app",
       "backgroundModes": [
         "audio",
         "fetch",
@@ -23,10 +24,12 @@
           "audio",
           "fetch",
           "processing"
-        ]
+        ],
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
+      "package": "com.videoclipper.app",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -39,12 +42,21 @@
       ]
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "output": "server",
+      "bundler": "metro"
     },
     "plugins": [
       "expo-router",
       "expo-video"
     ],
-    "scheme": "video-clipper"
+    "scheme": "video-clipper",
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "d9fc1c8e-0c45-4230-845c-3e9c9922db08"
+      }
+    },
+    "owner": "jongan69"
   }
 }

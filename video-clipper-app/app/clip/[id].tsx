@@ -11,7 +11,11 @@ export default function ClipPreview() {
   const insets = useSafeAreaInsets();
   const url = params.url as string;
   const clipId = params.id as string;
-  const videoUrl = `${API_BASE_URL}${url}`;
+  
+  // Ensure absolute URL for web compatibility
+  const videoUrl = url.startsWith('http://') || url.startsWith('https://') 
+    ? url 
+    : `${API_BASE_URL}${url}`;
   
   const player = useVideoPlayer(videoUrl, (player) => {
     player.play();
