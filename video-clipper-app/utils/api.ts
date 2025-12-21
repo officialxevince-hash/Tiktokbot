@@ -2,6 +2,9 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
 import { API_BASE_URL, APP_CONFIG } from './config';
 
+// Cache for File objects on web (since they can't be serialized in router params)
+const fileCache = new Map<string, File | Blob>();
+
 export interface Clip {
   id: string;
   url: string;
@@ -57,6 +60,14 @@ const fetchWithTimeout = async (
   }
 };
 
+// Helper function to cache File objects for web
+export function cacheFileForUpload(uri: string, file: File | Blob): void {
+  if (Platform.OS === 'web') {
+    fileCache.set(uri, file);
+    console.log(`[FileCache] Cached file for URI: ${uri}`);
+  }
+}
+
 export async function uploadVideo(uri: string, fileName: string): Promise<string> {
   const startTime = performance.now();
   console.log(`[uploadVideo] ⏱️  START - ${new Date().toISOString()}`);
@@ -78,18 +89,44 @@ export async function uploadVideo(uri: string, fileName: string): Promise<string
     
     // Handle web vs native platforms differently
     if (Platform.OS === 'web') {
-      // Web: Fetch the file as a Blob and append directly
-      console.log('[uploadVideo] Web platform - fetching file as Blob...');
+      // Web: Check cache first, then try to fetch from blob URL
+      console.log('[uploadVideo] Web platform - handling file upload...');
       const fileInfoStart = performance.now();
       
-      const response = await fetch(uri);
-      if (!response.ok) {
-        throw new Error('Failed to fetch video file');
+      let blob: Blob;
+      
+      // Check if we have a cached File/Blob object
+      const cachedFile = fileCache.get(uri);
+      if (cachedFile) {
+        console.log('[uploadVideo] Using cached File/Blob object');
+        blob = cachedFile;
+        // Remove from cache after use to free memory
+        fileCache.delete(uri);
+      } else if (uri.startsWith('blob:')) {
+        // Try to fetch blob URL (may fail if blob is revoked)
+        console.log('[uploadVideo] Attempting to fetch blob URL...');
+        try {
+          const response = await fetch(uri);
+          if (!response.ok) {
+            throw new Error('Failed to fetch video file from blob URL');
+          }
+          blob = await response.blob();
+        } catch (error) {
+          console.error('[uploadVideo] Failed to fetch blob URL:', error);
+          throw new Error('Blob URL is no longer valid. Please select the file again.');
+        }
+      } else {
+        // Regular URL - fetch it
+        console.log('[uploadVideo] Fetching from URL...');
+        const response = await fetch(uri);
+        if (!response.ok) {
+          throw new Error('Failed to fetch video file');
+        }
+        blob = await response.blob();
       }
       
-      const blob = await response.blob();
       const fileInfoTime = ((performance.now() - fileInfoStart) / 1000).toFixed(3);
-      console.log(`[uploadVideo] ✓ File fetched in ${fileInfoTime}s`);
+      console.log(`[uploadVideo] ✓ File prepared in ${fileInfoTime}s`);
       
       // Append Blob directly to FormData (web format)
       formData.append('file', blob, fileName);

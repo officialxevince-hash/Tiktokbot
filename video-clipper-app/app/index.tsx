@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Alert, Platform } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
-import { uploadVideo } from '../utils/api';
+import { cacheFileForUpload } from '../utils/api';
 
 export default function VideoPicker() {
   const [loading, setLoading] = useState(false);
@@ -49,10 +49,31 @@ export default function VideoPicker() {
       }
 
       // Prepare video queue
-      const videoQueue = validVideos.map(asset => ({
-        uri: asset.uri,
-        duration: asset.duration?.toString() || '0',
-        fileName: asset.fileName || 'video.mp4',
+      // On web, convert blob URLs to File objects immediately and cache them
+      const videoQueue = await Promise.all(validVideos.map(async (asset) => {
+        const baseItem = {
+          uri: asset.uri,
+          duration: asset.duration?.toString() || '0',
+          fileName: asset.fileName || 'video.mp4',
+        };
+        
+        // On web, convert blob URL to File object immediately and cache it
+        if (Platform.OS === 'web' && asset.uri.startsWith('blob:')) {
+          try {
+            const response = await fetch(asset.uri);
+            const blob = await response.blob();
+            const file = new File([blob], asset.fileName || 'video.mp4', { 
+              type: asset.mimeType || 'video/mp4' 
+            });
+            // Cache the file for later use in upload
+            cacheFileForUpload(asset.uri, file);
+            console.log(`[VideoPicker] Cached file for ${asset.fileName}`);
+          } catch (error) {
+            console.warn('Failed to convert blob to File, will try to fetch later:', error);
+          }
+        }
+        
+        return baseItem;
       }));
 
       // Navigate to processing screen with video queue
