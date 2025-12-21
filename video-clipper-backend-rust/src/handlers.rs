@@ -331,21 +331,120 @@ pub async fn clip_handler(
     let start_time = SystemTime::now();
     let mem_before = system_info::get_memory_usage();
 
-    // Get video metadata
-    let video = state
-        .videos
-        .read()
-        .await
-        .get(&request.video_id)
-        .cloned()
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Video not found".to_string(),
-                }),
-            )
-        })?;
+    // Get video metadata - check memory first, then file system (for multi-machine deployments)
+    let video = {
+        // First, try to get from in-memory HashMap
+        let videos_read = state.videos.read().await;
+        if let Some(video) = videos_read.get(&request.video_id) {
+            Some(video.clone())
+        } else {
+            drop(videos_read); // Release the read lock
+            
+            // Not in memory - check file system (handles multi-machine scenario)
+            info!("[POST /clip] Video not in memory, checking file system for video_id: {}", request.video_id);
+            
+            // Search for files starting with the video_id in uploads directory
+            let mut entries = tokio::fs::read_dir(&state.config.upload_dir).await
+                .map_err(|e| {
+                    error!("[POST /clip] Failed to read uploads directory: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("Failed to access uploads directory: {}", e),
+                        }),
+                    )
+                })?;
+            
+            let mut found_file: Option<PathBuf> = None;
+            while let Some(entry) = entries.next_entry().await
+                .map_err(|e| {
+                    error!("[POST /clip] Failed to read directory entry: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: format!("Failed to read directory: {}", e),
+                        }),
+                    )
+                })? {
+                let path = entry.path();
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if file_name.starts_with(&request.video_id) {
+                        found_file = Some(path);
+                        break;
+                    }
+                }
+            }
+            
+            if let Some(file_path) = found_file {
+                info!("[POST /clip] Found video file on disk: {:?}", file_path);
+                
+                // Get file metadata
+                let metadata = tokio::fs::metadata(&file_path).await
+                    .map_err(|e| {
+                        error!("[POST /clip] Failed to get file metadata: {}", e);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: format!("Failed to read file: {}", e),
+                            }),
+                        )
+                    })?;
+                
+                let file_size = metadata.len();
+                
+                // Get video duration
+                let duration = ffmpeg::get_video_duration(&file_path).await
+                    .map_err(|e| {
+                        error!("[POST /clip] Failed to get video duration: {}", e);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: format!("Failed to process video: {}", e),
+                            }),
+                        )
+                    })?;
+                
+                // Extract original filename (remove video_id prefix and dash)
+                let original_name = file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|name| {
+                        if let Some(stripped) = name.strip_prefix(&format!("{}-", request.video_id)) {
+                            stripped.to_string()
+                        } else {
+                            name.to_string()
+                        }
+                    })
+                    .unwrap_or_else(|| "video.mp4".to_string());
+                
+                // Create video metadata
+                let video_metadata = VideoMetadata {
+                    id: request.video_id.clone(),
+                    file_path: file_path.clone(),
+                    duration,
+                    original_name: original_name.clone(),
+                    file_size,
+                    uploaded_at: SystemTime::now(),
+                };
+                
+                // Store in memory for future use
+                state.videos.write().await.insert(request.video_id.clone(), video_metadata.clone());
+                info!("[POST /clip] ✅ Loaded video metadata from disk and cached in memory");
+                
+                Some(video_metadata)
+            } else {
+                None
+            }
+        }
+    }
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Video not found".to_string(),
+            }),
+        )
+    })?;
 
     let file_size_mb = (video.file_size as f64 / 1024.0 / 1024.0) as f64;
 
