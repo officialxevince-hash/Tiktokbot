@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: video-clipper-backend
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persist uploads and clips directories
+      - ./uploads:/app/uploads
+      - ./clips:/app/clips
+      # Mount config file if it exists (optional)
+      - ./config.toml:/app/config.toml:ro
+    environment:
+      # Server configuration
+      - PORT=3000
+      - UPLOAD_DIR=/app/uploads
+      - OUTPUT_DIR=/app/clips
+      # Performance configuration
+      - MAX_CONCURRENT_CLIPS=3
+      # Optional: Override max file size (in bytes, default: 500MB)
+      # - MAX_FILE_SIZE=524288000
+    restart: unless-stopped
+    # Healthcheck is optional - uncomment and customize if needed
+    # To use this, you may need to install curl or netcat in the Dockerfile
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:3000/config"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+    #   start_period: 40s
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
