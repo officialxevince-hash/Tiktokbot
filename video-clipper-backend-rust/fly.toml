@@ -11,8 +11,8 @@ primary_region = "iad"
 
 [env]
   PORT = "8080"
-  UPLOAD_DIR = "/app/uploads"
-  OUTPUT_DIR = "/app/clips"
+  UPLOAD_DIR = "/data/uploads"
+  OUTPUT_DIR = "/data/clips"
   MAX_CONCURRENT_CLIPS = "3"
 
 [http_service]
@@ -23,4 +23,8 @@ primary_region = "iad"
   memory_mb = 2048
   cpu_kind = "shared"
   cpus = 1
+
+[[mounts]]
+  source = "video_clipper_data"
+  destination = "/data"
 
