@@ -1,6 +1,8 @@
 // Frontend configuration
 // All settings should be configurable here, no hardcoded values in components
 
+import { Platform } from 'react-native';
+
 export interface AppConfig {
   api: {
     baseUrl: string;
@@ -42,19 +44,28 @@ export interface AppConfig {
   };
 }
 
-// Use local network IP for device access, localhost for simulator/web
-// For physical devices, use your local IP: http://192.168.40.29:3000 or https://tiktokbot-rust.onrender.com
-// For simulator/web, localhost works fine
-// Update this IP if your network changes
+// API URL configuration
+// Priority: EXPO_PUBLIC_API_URL env var > production default > dev default
+// For production web deployments, EXPO_PUBLIC_API_URL should be set in EAS
 const getApiUrl = () => {
   const envUrl = process.env.EXPO_PUBLIC_API_URL;
-  const defaultUrl = __DEV__ ? 'https://tiktokbot-rust.onrender.com' : 'http://localhost:3000';
+  
+  // Production default (for deployed web app)
+  const productionUrl = 'https://tiktokbot-rust.onrender.com';
+  
+  // Development default (for local development)
+  const devUrl = Platform.OS === 'web' 
+    ? 'http://localhost:3000' 
+    : 'http://192.168.40.29:3000';
+  
+  const defaultUrl = __DEV__ ? devUrl : productionUrl;
   const finalUrl = envUrl || defaultUrl;
   
   console.log('[API Config] EXPO_PUBLIC_API_URL:', envUrl);
   console.log('[API Config] Default URL:', defaultUrl);
   console.log('[API Config] Final API_BASE_URL:', finalUrl);
   console.log('[API Config] __DEV__:', __DEV__);
+  console.log('[API Config] Platform:', Platform.OS);
   
   return finalUrl;
 };
