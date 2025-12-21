@@ -656,6 +656,15 @@ export default function Processing() {
             </Text>
           </View>
         )}
+
+        {/* Restart Button */}
+        <TouchableOpacity
+          style={styles.restartButton}
+          onPress={() => router.replace('/')}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.restartButtonText}>🔄 Start Over</Text>
+        </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>
   );
@@ -875,6 +884,26 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+  },
+  restartButton: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 30,
+    paddingVertical: 16,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 24,
+    marginBottom: 20,
+    shadowColor: '#007AFF',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  restartButtonText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '700',
   },
 });
 
