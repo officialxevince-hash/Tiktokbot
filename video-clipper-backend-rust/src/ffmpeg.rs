@@ -206,9 +206,22 @@ pub async fn generate_clip(
         cmd.arg("-keyint_min").arg("30");
     }
     
-    // Tune settings
-    for tune in &ffmpeg_config.tune {
-        cmd.arg("-tune").arg(tune);
+    // Tune settings - filter out unsupported options for hardware encoders
+    // NVENC doesn't support "zerolatency" and "fastdecode" tune options
+    if video_codec == "libx264" {
+        // CPU encoding supports all tune options
+        for tune in &ffmpeg_config.tune {
+            cmd.arg("-tune").arg(tune);
+        }
+    } else {
+        // Hardware encoders have limited tune support
+        // Only include tune options that are compatible with hardware encoders
+        for tune in &ffmpeg_config.tune {
+            // Skip tune options not supported by hardware encoders
+            if tune != "zerolatency" && tune != "fastdecode" {
+                cmd.arg("-tune").arg(tune);
+            }
+        }
     }
     
     // Pixel format

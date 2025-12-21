@@ -344,33 +344,41 @@ pub async fn clip_handler(
             info!("[POST /clip] Video not in memory, checking file system for video_id: {}", request.video_id);
             
             // Search for files starting with the video_id in uploads directory
-            let mut entries = tokio::fs::read_dir(&state.config.upload_dir).await
-                .map_err(|e| {
+            let entries = match tokio::fs::read_dir(&state.config.upload_dir).await {
+                Ok(entries) => entries,
+                Err(e) => {
                     error!("[POST /clip] Failed to read uploads directory: {}", e);
-                    (
+                    return Err((
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(ErrorResponse {
                             error: format!("Failed to access uploads directory: {}", e),
                         }),
-                    )
-                })?;
+                    ));
+                }
+            };
             
             let mut found_file: Option<PathBuf> = None;
-            while let Some(entry) = entries.next_entry().await
-                .map_err(|e| {
-                    error!("[POST /clip] Failed to read directory entry: {}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: format!("Failed to read directory: {}", e),
-                        }),
-                    )
-                })? {
-                let path = entry.path();
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    if file_name.starts_with(&request.video_id) {
-                        found_file = Some(path);
-                        break;
+            let mut dir_entries = entries;
+            loop {
+                match dir_entries.next_entry().await {
+                    Ok(Some(entry)) => {
+                        let path = entry.path();
+                        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                            if file_name.starts_with(&request.video_id) {
+                                found_file = Some(path);
+                                break;
+                            }
+                        }
+                    }
+                    Ok(None) => break, // End of directory
+                    Err(e) => {
+                        error!("[POST /clip] Failed to read directory entry: {}", e);
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: format!("Failed to read directory: {}", e),
+                            }),
+                        ));
                     }
                 }
             }
@@ -379,30 +387,34 @@ pub async fn clip_handler(
                 info!("[POST /clip] Found video file on disk: {:?}", file_path);
                 
                 // Get file metadata
-                let metadata = tokio::fs::metadata(&file_path).await
-                    .map_err(|e| {
+                let metadata = match tokio::fs::metadata(&file_path).await {
+                    Ok(meta) => meta,
+                    Err(e) => {
                         error!("[POST /clip] Failed to get file metadata: {}", e);
-                        (
+                        return Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(ErrorResponse {
                                 error: format!("Failed to read file: {}", e),
                             }),
-                        )
-                    })?;
+                        ));
+                    }
+                };
                 
                 let file_size = metadata.len();
                 
                 // Get video duration
-                let duration = ffmpeg::get_video_duration(&file_path).await
-                    .map_err(|e| {
+                let duration = match ffmpeg::get_video_duration(&file_path).await {
+                    Ok(dur) => dur,
+                    Err(e) => {
                         error!("[POST /clip] Failed to get video duration: {}", e);
-                        (
+                        return Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(ErrorResponse {
                                 error: format!("Failed to process video: {}", e),
                             }),
-                        )
-                    })?;
+                        ));
+                    }
+                };
                 
                 // Extract original filename (remove video_id prefix and dash)
                 let original_name = file_path
