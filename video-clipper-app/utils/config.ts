@@ -51,7 +51,7 @@ const getApiUrl = () => {
   const envUrl = process.env.EXPO_PUBLIC_API_URL;
   
   // Production default (for deployed web app)
-  const productionUrl = 'https://tiktokbot-rust.onrender.com';
+  const productionUrl = 'https://tiktokbot-hcfnvg.fly.dev';
   
   // Development default (for local development)
   const devUrl = Platform.OS === 'web' 

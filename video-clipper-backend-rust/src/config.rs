@@ -120,18 +120,18 @@ pub struct ConfigFile {
 
 // Default functions for serde
 fn default_thread_queue_size() -> usize { 512 }
-fn default_bufsize() -> String { "1M".to_string() }
-fn default_maxrate() -> String { "4M".to_string() }
+fn default_bufsize() -> String { "2M".to_string() }
+fn default_maxrate() -> String { "8M".to_string() }
 fn default_gop_size() -> u32 { 30 }
 fn default_keyint_min() -> u32 { 30 }
 fn default_video_codec() -> String { "libx264".to_string() }
 fn default_videotoolbox_quality_min() -> u8 { 50 }
 fn default_videotoolbox_quality_max() -> u8 { 100 }
 fn default_videotoolbox_crf_multiplier() -> f64 { 3.57 }
-fn default_nvenc_preset() -> String { "p1".to_string() }
+fn default_nvenc_preset() -> String { "p4".to_string() }
 fn default_nvenc_rc() -> String { "vbr".to_string() }
-fn default_qsv_preset() -> String { "veryfast".to_string() }
-fn default_amf_quality() -> String { "speed".to_string() }
+fn default_qsv_preset() -> String { "balanced".to_string() }
+fn default_amf_quality() -> String { "balanced".to_string() }
 fn default_amf_rc() -> String { "vbr_peak".to_string() }
 fn default_threads_1_2_min() -> usize { 2 }
 fn default_threads_1_2_max() -> usize { 6 }
@@ -234,13 +234,13 @@ impl Config {
         let ffmpeg = config_file.as_ref()
             .map(|c| c.ffmpeg.clone())
             .unwrap_or_else(|| FfmpegConfig {
-                preset: "ultrafast".to_string(), // Faster encoding for large videos
-                crf: 28, // Slightly lower quality for speed (acceptable for clips)
-                profile: "baseline".to_string(),
-                level: "3.0".to_string(),
+                preset: "medium".to_string(), // Good balance of quality and speed
+                crf: 20, // High quality (lower is better, 18-23 range recommended)
+                profile: "high".to_string(), // Best quality profile
+                level: "4.0".to_string(), // Higher level for better quality
                 threads_per_clip: None,
                 pixel_format: "yuv420p".to_string(),
-                tune: vec!["fastdecode".to_string(), "zerolatency".to_string()],
+                tune: vec![], // No tune for better quality (removed fastdecode/zerolatency)
                 audio_codec: "copy".to_string(),
                 use_input_seeking: true,
                 additional_flags: vec!["+faststart".to_string(), "fflags=+genpts".to_string(), "avoid_negative_ts=make_zero".to_string()],
@@ -350,13 +350,13 @@ impl Default for Config {
             upload_buffer_size: 524288, // 512KB for better I/O performance with large files
             upload_log_interval: 100,
             ffmpeg: FfmpegConfig {
-                preset: "ultrafast".to_string(), // Faster encoding for large videos
-                crf: 28, // Slightly lower quality for speed (acceptable for clips)
-                profile: "baseline".to_string(),
-                level: "3.0".to_string(),
+                preset: "medium".to_string(), // Good balance of quality and speed
+                crf: 20, // High quality (lower is better, 18-23 range recommended)
+                profile: "high".to_string(), // Best quality profile
+                level: "4.0".to_string(), // Higher level for better quality
                 threads_per_clip: None,
                 pixel_format: "yuv420p".to_string(),
-                tune: vec!["fastdecode".to_string(), "zerolatency".to_string()],
+                tune: vec![], // No tune for better quality (removed fastdecode/zerolatency)
                 audio_codec: "copy".to_string(),
                 use_input_seeking: true,
                 additional_flags: vec!["+faststart".to_string(), "fflags=+genpts".to_string(), "avoid_negative_ts=make_zero".to_string()],

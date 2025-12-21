@@ -2,7 +2,7 @@
 export async function POST(request: Request): Promise<Response> {
   try {
     // Use environment variable or default to production backend
-    const apiUrl = process.env.EXPO_PUBLIC_API_URL || 'https://tiktokbot-rust.onrender.com';
+    const apiUrl = process.env.EXPO_PUBLIC_API_URL || 'https://tiktokbot-hcfnvg.fly.dev';
     const backendUrl = `${apiUrl}/clip`;
 
     console.log('[API Route] Clip generation - Backend URL:', backendUrl);

@@ -2,7 +2,7 @@
 export async function POST(request: Request): Promise<Response> {
   try {
     // Use environment variable or default to production backend
-    const apiUrl = process.env.EXPO_PUBLIC_API_URL || 'https://tiktokbot-rust.onrender.com';
+    const apiUrl = process.env.EXPO_PUBLIC_API_URL || 'https://tiktokbot-hcfnvg.fly.dev';
     const backendUrl = `${apiUrl}/upload`;
 
     console.log('[API Route] Upload - Backend URL:', backendUrl);
@@ -10,7 +10,8 @@ export async function POST(request: Request): Promise<Response> {
 
     // Get the form data from the request
     const formData = await request.formData();
-    const file = formData.get('file');
+    // TypeScript may not recognize FormData.get() - cast through unknown to Web API FormData type
+    const file = (formData as unknown as globalThis.FormData).get('file') as File | null;
     console.log('[API Route] File received:', file ? 'Yes' : 'No');
     if (file instanceof File) {
       console.log('[API Route] File name:', file.name);

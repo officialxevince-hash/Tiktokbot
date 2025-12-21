@@ -28,23 +28,23 @@ upload_log_interval = 100
 
 [ffmpeg]
 # Video encoding preset (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow)
-# ultrafast = maximum speed (recommended for short clips where speed > quality)
-# veryfast = good balance of speed and quality (use if quality is more important)
-preset = "ultrafast"
+# medium = good balance of quality and speed (recommended for quality)
+# fast = faster encoding with good quality
+preset = "medium"
 
 # Constant Rate Factor (CRF) - quality setting
 # Lower = better quality but larger files (18-28 range recommended)
-# 28 = faster encoding, acceptable quality for short clips
-# 23 = better quality, slower encoding (use if quality is critical)
-crf = 28
+# 20 = high quality, good for clips (recommended)
+# 23 = good quality, faster encoding
+crf = 20
 
 # Video codec profile (baseline, main, high)
-# baseline = fastest encoding, best compatibility
-profile = "baseline"
+# high = best quality and compression efficiency
+profile = "high"
 
 # H.264 level (3.0, 3.1, 4.0, etc.)
-# 3.0 is good for most use cases
-level = "3.0"
+# 4.0 allows higher resolution and bitrate for better quality
+level = "4.0"
 
 # Number of threads per clip encoding
 # Set to 0 to auto-detect (half of CPU count, max 4)
@@ -54,8 +54,9 @@ threads_per_clip = 0
 # Pixel format
 pixel_format = "yuv420p"
 
-# Tune settings (comma-separated: fastdecode, zerolatency, etc.)
-tune = ["fastdecode", "zerolatency"]
+# Tune settings (comma-separated: film, animation, grain, stillimage, fastdecode, zerolatency)
+# Remove fastdecode/zerolatency for better quality, or use film/animation for content-specific optimization
+tune = []
 
 # Audio codec (copy = no re-encoding, fastest)
 audio_codec = "copy"
@@ -113,10 +114,12 @@ cleanup_max_age_seconds = 1800
 thread_queue_size = 512
 
 # Buffer size for encoding (e.g., "1M", "512k")
-bufsize = "1M"
+# Larger buffer allows better quality encoding
+bufsize = "2M"
 
 # Maximum bitrate (e.g., "4M", "2M")
-maxrate = "4M"
+# Higher bitrate = better quality (8M recommended for high quality clips)
+maxrate = "8M"
 
 # GOP size (Group of Pictures) for faster seeking
 gop_size = 30
@@ -133,10 +136,13 @@ videotoolbox_quality_max = 100
 videotoolbox_crf_multiplier = 3.57
 
 # Hardware encoder presets
-nvenc_preset = "p1"
+# p4 = slower but better quality for NVENC
+nvenc_preset = "p4"
 nvenc_rc = "vbr"
-qsv_preset = "veryfast"
-amf_quality = "speed"
+# balanced = better quality/speed balance for QSV
+qsv_preset = "balanced"
+# balanced = better quality for AMF
+amf_quality = "balanced"
 amf_rc = "vbr_peak"
 
 # Thread allocation settings

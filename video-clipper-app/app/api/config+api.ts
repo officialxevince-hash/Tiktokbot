@@ -4,8 +4,8 @@
 export async function GET(request: Request): Promise<Response> {
   try {
     // Use environment variable or default to production backend
-    const apiUrl = process.env.EXPO_PUBLIC_API_URL || 'https://tiktokbot-rust.onrender.com';
-    const backendUrl = `${apiUrl}/config`;
+      const apiUrl = process.env.EXPO_PUBLIC_API_URL || 'https://tiktokbot-hcfnvg.fly.dev';
+      const backendUrl = `${apiUrl}/config`;
 
     const response = await fetch(backendUrl, {
       method: 'GET',

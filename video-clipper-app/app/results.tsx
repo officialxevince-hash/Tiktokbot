@@ -291,6 +291,15 @@ export default function Results() {
       player.muted = APP_CONFIG.video.player.muted;
       playerRef.current = player;
       videoPlayersRef.current.set(clipId, player);
+      
+      // On web, ensure player is ready and log for debugging
+      if (Platform.OS === 'web' && __DEV__) {
+        console.log(`[ClipVideoPreview] Player initialized for ${clipId}:`, {
+          url: fullVideoUrl,
+          playing: player.playing,
+          currentTime: player.currentTime,
+        });
+      }
     });
 
     // Listen to playing state changes
@@ -299,23 +308,37 @@ export default function Results() {
       
       const playingListener = player.addListener('playingChange', () => {
         try {
-          setIsPlaying(player?.playing ?? false);
+          const playing = player?.playing ?? false;
+          setIsPlaying(playing);
+          if (Platform.OS === 'web' && __DEV__) {
+            console.log(`[ClipVideoPreview] Playing state changed for ${clipId}:`, playing);
+          }
         } catch (e) {
           // Player may have been disposed
+          if (__DEV__) {
+            console.warn(`[ClipVideoPreview] Error in playingChange listener for ${clipId}:`, e);
+          }
         }
       });
       
       // Set initial playing state
       try {
-        setIsPlaying(player?.playing ?? false);
+        const initialPlaying = player?.playing ?? false;
+        setIsPlaying(initialPlaying);
+        if (Platform.OS === 'web' && __DEV__) {
+          console.log(`[ClipVideoPreview] Initial playing state for ${clipId}:`, initialPlaying);
+        }
       } catch (e) {
         // Player may not be ready yet
+        if (__DEV__) {
+          console.warn(`[ClipVideoPreview] Could not get initial playing state for ${clipId}:`, e);
+        }
       }
       
       return () => {
         playingListener.remove();
       };
-    }, [player, shouldLoad]);
+    }, [player, shouldLoad, clipId]);
 
     // Handle video ending - pause and show thumbnail
     useEffect(() => {
@@ -339,20 +362,35 @@ export default function Results() {
 
     const handlePlayPause = useCallback(() => {
       try {
-        if (!player) return;
+        if (!player) {
+          if (__DEV__) {
+            console.warn(`[ClipVideoPreview] No player available for ${clipId}`);
+          }
+          return;
+        }
         
         if (isPlaying) {
           player.pause();
           setIsPlaying(false);
+          if (Platform.OS === 'web' && __DEV__) {
+            console.log(`[ClipVideoPreview] Paused ${clipId}`);
+          }
         } else {
           player.loop = APP_CONFIG.video.player.loop;
+          player.muted = APP_CONFIG.video.player.muted;
           player.play();
           setIsPlaying(true);
+          if (Platform.OS === 'web' && __DEV__) {
+            console.log(`[ClipVideoPreview] Playing ${clipId}`);
+          }
         }
       } catch (e) {
         // Player may have been disposed
+        if (__DEV__) {
+          console.error(`[ClipVideoPreview] Error in handlePlayPause for ${clipId}:`, e);
+        }
       }
-    }, [player, isPlaying]);
+    }, [player, isPlaying, clipId]);
     
     if (!shouldLoad) {
       // Placeholder while not visible - show thumbnail image
@@ -394,9 +432,15 @@ export default function Results() {
       );
     }
 
+    // On web, always show VideoView when player exists (not just when playing)
+    // This ensures the video element is rendered and can be controlled
+    const shouldShowVideo = Platform.OS === 'web' 
+      ? (player !== null) // On web, show video element when player exists
+      : (isPlaying && player); // On native, only show when playing
+
     return (
       <View style={styles.videoContainer}>
-        {isPlaying && player ? (
+        {shouldShowVideo && player ? (
           <VideoView
             player={player}
             style={styles.videoPreview}
