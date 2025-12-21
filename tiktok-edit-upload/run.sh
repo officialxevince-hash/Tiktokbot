@@ -56,6 +56,14 @@ if ! command -v ffmpeg &> /dev/null; then
     echo -e "${YELLOW}[!] Install with: brew install ffmpeg (macOS) or apt-get install ffmpeg (Linux)${NC}"
 fi
 
+# Check if Node.js is available (recommended for Playwright)
+if ! command -v node &> /dev/null; then
+    echo -e "${YELLOW}[!] Warning: Node.js is not installed${NC}"
+    echo -e "${YELLOW}[!] Node.js is recommended for Playwright browser installation${NC}"
+    echo -e "${YELLOW}[!] Install with: brew install node (macOS) or your system's package manager${NC}"
+    echo -e "${YELLOW}[!] Will attempt to use bun's node compatibility as fallback${NC}"
+fi
+
 # Step 1: Create virtual environment if it doesn't exist
 echo -e "${CYAN}[1/4] Setting up Python virtual environment...${NC}"
 if [ ! -d "venv" ]; then
@@ -103,23 +111,67 @@ cd "$SIGNATURE_DIR"
 echo -e "${GREEN}[+] Installing dependencies with bun...${NC}"
 bun install
 
-# Verify Playwright package is installed
+# Verify Playwright packages are installed
 if [ ! -d "node_modules/playwright-chromium" ]; then
     echo -e "${RED}[-] Error: Playwright package installation failed${NC}"
     echo -e "${YELLOW}[!] Please check the error messages above${NC}"
     exit 1
 fi
 
+# Verify playwright-core is installed (required dependency)
+if [ ! -d "node_modules/playwright-core" ]; then
+    echo -e "${RED}[-] Error: playwright-core not installed${NC}"
+    echo -e "${YELLOW}[!] This should be installed automatically. Trying to fix...${NC}"
+    bun add playwright-core
+    bun install
+fi
+
 # Install Playwright browser binaries
 echo -e "${GREEN}[+] Installing Playwright browser binaries...${NC}"
-# Try multiple methods to install browser binaries
-if [ -f "node_modules/.bin/playwright" ]; then
-    bun run node_modules/.bin/playwright install chromium
+
+# Verify playwright-core is properly installed before proceeding
+if [ ! -d "node_modules/playwright-core" ] || [ ! -f "node_modules/playwright-core/lib/cli/program.js" ]; then
+    echo -e "${YELLOW}[!] playwright-core not properly installed, reinstalling...${NC}"
+    bun remove playwright-core 2>/dev/null || true
+    bun add playwright-core
+    bun install
+fi
+
+# Playwright needs node to run its install script properly
+# Check if node is available (most reliable method)
+if command -v node &> /dev/null; then
+    echo -e "${GREEN}[+] Using node to install browser binaries...${NC}"
+    # Try the playwright-chromium CLI first
+    if [ -f "node_modules/playwright-chromium/cli.js" ]; then
+        node node_modules/playwright-chromium/cli.js install chromium
+    # Fallback to playwright binary if it exists
+    elif [ -f "node_modules/.bin/playwright" ]; then
+        node node_modules/.bin/playwright install chromium
+    # Try using npx
+    elif command -v npx &> /dev/null; then
+        npx playwright-chromium install chromium
+    else
+        echo -e "${YELLOW}[!] Could not find playwright CLI script${NC}"
+        echo -e "${YELLOW}[!] Trying alternative installation method...${NC}"
+        # Try installing via the package's postinstall script
+        bun run --bun node_modules/playwright-chromium/cli.js install chromium 2>/dev/null || \
+        echo -e "${YELLOW}[!] Manual installation may be required${NC}"
+    fi
 else
-    # Use bunx (bun's equivalent of npx)
-    bunx --bun playwright install chromium || \
-    bunx playwright install chromium || \
-    bun run node_modules/playwright-chromium/cli.js install chromium
+    # Node not available, try using bun
+    echo -e "${YELLOW}[!] Node.js not found, using bun...${NC}"
+    echo -e "${YELLOW}[!] Note: For best results, install Node.js: brew install node${NC}"
+    
+    # Try using bun to run the script
+    if [ -f "node_modules/playwright-chromium/cli.js" ]; then
+        # Use bun with --bun flag to use bun's runtime
+        bun --bun node_modules/playwright-chromium/cli.js install chromium 2>/dev/null || \
+        bun node_modules/playwright-chromium/cli.js install chromium 2>/dev/null || \
+        echo -e "${YELLOW}[!] Browser installation failed. Please install Node.js and run:${NC}"
+        echo -e "${YELLOW}[!]   cd $SIGNATURE_DIR && node node_modules/playwright-chromium/cli.js install chromium${NC}"
+    else
+        echo -e "${YELLOW}[!] Could not find playwright CLI. Please install Node.js and try again.${NC}"
+    fi
 fi
 
 cd "$SCRIPT_DIR"

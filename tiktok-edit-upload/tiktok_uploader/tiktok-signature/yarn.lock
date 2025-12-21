@@ -9,7 +9,7 @@ playwright-chromium@^1.10.0:
   dependencies:
     playwright-core "1.49.0"
 
-playwright-core@1.49.0:
+playwright-core@^1.10.0, playwright-core@1.49.0:
   version "1.49.0"
   resolved "https://registry.npmjs.org/playwright-core/-/playwright-core-1.49.0.tgz"
   integrity sha512-R+3KKTQF3npy5GTiKH/T+kdhoJfJojjHESR1YEWhYuEKRVfVaxH3+4+GvXE5xyCngCxhxnykk0Vlah9v8fs3jA==
