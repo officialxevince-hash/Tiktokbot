@@ -249,19 +249,27 @@ export default function Results() {
     const playerRef = useRef<any>(null);
     // Ensure absolute URLs for web compatibility
     const fullThumbnailUrl = useMemo(() => {
-      if (thumbnailUrl.startsWith('http://') || thumbnailUrl.startsWith('https://')) {
-        return thumbnailUrl;
+      const url = thumbnailUrl.startsWith('http://') || thumbnailUrl.startsWith('https://')
+        ? thumbnailUrl
+        : `${API_BASE_URL}${thumbnailUrl}`;
+      // Debug logging to help diagnose 404 issues
+      if (__DEV__) {
+        console.log(`[ClipVideoPreview] Thumbnail URL for ${clipId}:`, url);
       }
-      return `${API_BASE_URL}${thumbnailUrl}`;
-    }, [thumbnailUrl]);
+      return url;
+    }, [thumbnailUrl, clipId]);
     
     // Ensure video URL is absolute for web
     const fullVideoUrl = useMemo(() => {
-      if (videoUrl.startsWith('http://') || videoUrl.startsWith('https://')) {
-        return videoUrl;
+      const url = videoUrl.startsWith('http://') || videoUrl.startsWith('https://')
+        ? videoUrl
+        : `${API_BASE_URL}${videoUrl}`;
+      // Debug logging to help diagnose 404 issues
+      if (__DEV__) {
+        console.log(`[ClipVideoPreview] Video URL for ${clipId}:`, url);
       }
-      return `${API_BASE_URL}${videoUrl}`;
-    }, [videoUrl]);
+      return url;
+    }, [videoUrl, clipId]);
     
     // Once visible, always stay loaded (prevent flicker on scroll)
     // Use InteractionManager to defer loading during scroll
@@ -459,7 +467,10 @@ export default function Results() {
     const videoUrl = item.url.startsWith('http://') || item.url.startsWith('https://')
       ? item.url
       : `${API_BASE_URL}${item.url}`;
-    const thumbnailUrl = item.thumbnail_url || item.url.replace('.mp4', '.jpg');
+    const thumbnailUrlRaw = item.thumbnail_url || item.url.replace('.mp4', '.jpg');
+    const thumbnailUrl = thumbnailUrlRaw.startsWith('http://') || thumbnailUrlRaw.startsWith('https://')
+      ? thumbnailUrlRaw
+      : `${API_BASE_URL}${thumbnailUrlRaw}`;
     const isSelected = selectedClips.has(item.id);
     const isSaving = saving === item.id;
     const isVisible = visibleClips.has(item.id) || index < 2;
