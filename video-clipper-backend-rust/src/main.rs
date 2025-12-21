@@ -24,7 +24,7 @@ mod system_info;
 
 use cleanup::start_cleanup_task;
 use config::Config;
-use handlers::{clip_handler, config_handler, upload_handler};
+use handlers::{clip_handler, config_handler, root_handler, upload_handler};
 use models::AppState;
 
 /// Get local IP address for network access
@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
     // Render service tier.
     
     let app = Router::new()
+        .route("/", get(root_handler))
         .route("/config", get(config_handler))
         .route("/upload", post(upload_handler))
         .route("/clip", post(clip_handler))

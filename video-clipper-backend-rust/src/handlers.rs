@@ -280,6 +280,22 @@ pub async fn upload_handler(
     Ok(Json(UploadResponse { video_id }))
 }
 
+/// Root route handler - returns API information
+pub async fn root_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "service": "Video Clipper Backend",
+        "version": "1.0.0",
+        "status": "running",
+        "endpoints": {
+            "GET /": "API information (this endpoint)",
+            "GET /config": "Get backend configuration and system limits",
+            "POST /upload": "Upload a video file",
+            "POST /clip": "Generate clips from an uploaded video",
+            "GET /clips/*": "Serve generated clip files"
+        }
+    }))
+}
+
 /// Get backend configuration and system limits
 pub async fn config_handler(
     State(state): State<Arc<AppState>>,
