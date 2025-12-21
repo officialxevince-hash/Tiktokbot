@@ -241,6 +241,11 @@ pub async fn generate_clip(
         }
     }
     
+    // Scale video to max 1080p for faster encoding and smaller files
+    // This is optimal for social media clips (TikTok, Instagram, etc. max at 1080p)
+    // Maintains aspect ratio and only scales down if source is larger than 1080p
+    cmd.arg("-vf").arg("scale='min(1920,iw)':'min(1080,ih)':force_original_aspect_ratio=decrease");
+    
     // Pixel format
     cmd.arg("-pix_fmt").arg(&ffmpeg_config.pixel_format);
     
