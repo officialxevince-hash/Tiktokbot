@@ -179,8 +179,7 @@ cd "$SCRIPT_DIR"
 # Step 4: Check for .env file
 echo -e "\n${CYAN}[4/4] Checking configuration...${NC}"
 if [ ! -f ".env" ]; then
-    echo -e "${YELLOW}[!] Warning: .env file not found${NC}"
-    echo -e "${YELLOW}[!] Creating .env file template...${NC}"
+    echo -e "${GREEN}[+] Creating .env file template...${NC}"
     cat > .env << EOF
 # TikTok Username
 TIKTOK_USERNAME=your_username_here
@@ -194,16 +193,40 @@ TIKTOK_USERNAME=your_username_here
 # Testing: Set to 'true' to bypass schedule and post immediately
 # IMMEDIATE_POST_FOR_TESTING=false
 EOF
-    echo -e "${YELLOW}[!] Please edit .env file and add your TikTok username${NC}"
-    echo -e "${YELLOW}[!] Then run this script again${NC}"
-    exit 1
+    echo -e "${GREEN}[+] .env file created${NC}"
 fi
 
 # Check if TIKTOK_USERNAME is set
-if ! grep -q "TIKTOK_USERNAME=" .env || grep -q "TIKTOK_USERNAME=your_username_here" .env; then
-    echo -e "${YELLOW}[!] Warning: TIKTOK_USERNAME not set in .env file${NC}"
-    echo -e "${YELLOW}[!] Please edit .env file and add your TikTok username${NC}"
-    exit 1
+TIKTOK_USERNAME=$(grep "TIKTOK_USERNAME=" .env 2>/dev/null | cut -d '=' -f2 | tr -d '"' | tr -d "'" | xargs)
+
+if [ -z "$TIKTOK_USERNAME" ] || [ "$TIKTOK_USERNAME" = "your_username_here" ]; then
+    echo -e "${YELLOW}[!] TIKTOK_USERNAME not set in .env file${NC}"
+    echo -e "${CYAN}[?] Please enter your TikTok username:${NC} "
+    read -r USERNAME
+    
+    if [ -z "$USERNAME" ]; then
+        echo -e "${RED}[-] Error: Username cannot be empty${NC}"
+        echo -e "${YELLOW}[!] Please edit .env file and set TIKTOK_USERNAME${NC}"
+        exit 1
+    fi
+    
+    # Update .env file with the username
+    if grep -q "TIKTOK_USERNAME=" .env; then
+        # Replace existing TIKTOK_USERNAME line
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            # macOS uses different sed syntax
+            sed -i '' "s/^TIKTOK_USERNAME=.*/TIKTOK_USERNAME=$USERNAME/" .env
+        else
+            # Linux sed syntax
+            sed -i "s/^TIKTOK_USERNAME=.*/TIKTOK_USERNAME=$USERNAME/" .env
+        fi
+    else
+        # Add TIKTOK_USERNAME if it doesn't exist
+        echo "TIKTOK_USERNAME=$USERNAME" >> .env
+    fi
+    
+    echo -e "${GREEN}[+] TikTok username set to: $USERNAME${NC}"
+    TIKTOK_USERNAME="$USERNAME"
 fi
 
 # Create necessary directories
@@ -223,13 +246,8 @@ fi
 # Step 5: Check for TikTok login
 echo -e "\n${CYAN}[5/5] Checking TikTok login status...${NC}"
 
-# Get TikTok username from .env
+# Get TikTok username from .env (should already be set from previous step)
 TIKTOK_USERNAME=$(grep "TIKTOK_USERNAME=" .env | cut -d '=' -f2 | tr -d '"' | tr -d "'" | xargs)
-
-if [ -z "$TIKTOK_USERNAME" ] || [ "$TIKTOK_USERNAME" = "your_username_here" ]; then
-    echo -e "${RED}[-] Error: TIKTOK_USERNAME not properly set in .env file${NC}"
-    exit 1
-fi
 
 # Check if cookie file exists
 COOKIE_FILE="CookiesDir/tiktok_session-${TIKTOK_USERNAME}.cookie"
