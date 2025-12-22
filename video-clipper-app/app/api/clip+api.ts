@@ -12,8 +12,9 @@ export async function POST(request: Request): Promise<Response> {
     console.log('[API Route] Request body:', JSON.stringify(body));
 
     // Create AbortController for timeout (clip generation can take 60+ seconds)
+    // Increased to 600 seconds (10 minutes) to match frontend timeout and allow for 4K video processing
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000); // 120 seconds timeout
+    const timeoutId = setTimeout(() => controller.abort(), 600000); // 600 seconds (10 minutes) timeout
 
     try {
       const response = await fetch(backendUrl, {

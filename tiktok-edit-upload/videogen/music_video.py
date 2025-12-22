@@ -16,6 +16,7 @@ import gc
 import time
 import threading
 from typing import List, Optional, Tuple
+import numpy as np
 from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips, VideoClip
 from moviepy.video.fx.all import crop, resize, rotate
 from termcolor import colored
@@ -247,10 +248,43 @@ def check_system_resources(num_segments: int = 0) -> dict:
 # Main Functions
 # ============================================================================
 
+def is_white_or_blank_frame(frame: np.ndarray, threshold: float = 0.95) -> bool:
+    """
+    Check if a frame is predominantly white or blank.
+    
+    Args:
+        frame: Frame array (numpy array)
+        threshold: Threshold for considering frame white (0-1, higher = more strict)
+    
+    Returns:
+        bool: True if frame is white/blank, False otherwise
+    """
+    try:
+        # Convert to float if needed
+        if frame.dtype != np.float32 and frame.dtype != np.float64:
+            frame = frame.astype(np.float32) / 255.0
+        
+        # Calculate mean brightness
+        mean_brightness = np.mean(frame)
+        
+        # Check if frame is predominantly white (brightness > threshold)
+        # Also check if frame has very low variance (blank/static frame)
+        variance = np.var(frame)
+        
+        # Frame is white if mean brightness is high AND variance is low
+        is_white = mean_brightness > threshold and variance < 0.01
+        
+        return is_white
+    except Exception:
+        # If we can't analyze, assume it's not white
+        return False
+
+
 def create_interesting_thumbnail(video: VideoClip, interesting_times: List[float] = None, thumbnail_duration: float = 0.2) -> VideoClip:
     """
     Create an interesting thumbnail by selecting a visually striking frame from the video.
     Prefers frames with effects or from interesting moments.
+    AVOIDS white/blank frames that can appear from flash effects.
     
     Args:
         video: VideoClip to extract thumbnail from
@@ -261,12 +295,14 @@ def create_interesting_thumbnail(video: VideoClip, interesting_times: List[float
         VideoClip: A short clip suitable as thumbnail
     """
     try:
+        from moviepy.editor import ImageClip
+        
         video_duration = video.duration
         
         # If we have interesting times (from effects), prefer those
         if interesting_times:
-            # Filter to valid times within video duration
-            valid_times = [t for t in interesting_times if 0.1 < t < video_duration - 0.1]
+            # Filter to valid times within video duration (avoid very start to skip flash effects)
+            valid_times = [t for t in interesting_times if 0.2 < t < video_duration - 0.1]
             if valid_times:
                 # Select from interesting times, prefer earlier ones (first 30% of video)
                 early_times = [t for t in valid_times if t < video_duration * 0.3]
@@ -289,35 +325,107 @@ def create_interesting_thumbnail(video: VideoClip, interesting_times: List[float
                 video_duration * 0.3,   # 30% into video
             ]
             
-            # Filter to valid times
-            candidate_times = [t for t in candidate_times if t < video_duration - 0.1]
+            # Filter to valid times (ensure we're past any flash effects)
+            candidate_times = [t for t in candidate_times if 0.2 < t < video_duration - 0.1]
             
             if not candidate_times:
-                # Fallback: use a frame from the middle
-                selected_time = video_duration * 0.3
+                # Fallback: use a frame from the middle, but avoid very start
+                selected_time = max(0.5, video_duration * 0.3)
             else:
                 selected_time = random.choice(candidate_times)
         
-        # Extract frame at selected time
+        # Extract frame at selected time and check if it's white
         frame = video.get_frame(selected_time)
         
-        # Create a short clip from this frame (hold it for thumbnail_duration)
-        from moviepy.editor import ImageClip
+        # If frame is white, try to find a non-white frame
+        if is_white_or_blank_frame(frame):
+            logger.warning(colored(f"[-] Selected frame at {selected_time:.2f}s is white, searching for better frame", "yellow"))
+            
+            # Try multiple times to find a non-white frame
+            search_times = [
+                selected_time + 0.1,
+                selected_time + 0.2,
+                selected_time + 0.3,
+                video_duration * 0.15,
+                video_duration * 0.25,
+                video_duration * 0.4,
+            ]
+            
+            found_good_frame = False
+            for search_time in search_times:
+                if search_time >= video_duration - 0.1:
+                    continue
+                try:
+                    test_frame = video.get_frame(search_time)
+                    if not is_white_or_blank_frame(test_frame):
+                        frame = test_frame
+                        selected_time = search_time
+                        found_good_frame = True
+                        logger.info(colored(f"[+] Found non-white frame at {selected_time:.2f}s", "green"))
+                        break
+                except Exception:
+                    continue
+            
+            # If we still have a white frame, use it anyway (better than failing)
+            if not found_good_frame:
+                logger.warning(colored(f"[-] Could not find non-white frame, using frame at {selected_time:.2f}s", "yellow"))
         
-        # Convert frame to ImageClip
+        # Create a short clip from this frame (hold it for thumbnail_duration)
         thumbnail_clip = ImageClip(frame).set_duration(thumbnail_duration)
         thumbnail_clip = thumbnail_clip.set_fps(video.fps)
         
         return thumbnail_clip
         
     except Exception as e:
-        logger.warning(colored(f"[-] Error creating thumbnail: {e}, using first frame", "yellow"))
-        # Fallback: use first frame
-        frame = video.get_frame(0)
-        from moviepy.editor import ImageClip
-        thumbnail_clip = ImageClip(frame).set_duration(thumbnail_duration)
-        thumbnail_clip = thumbnail_clip.set_fps(video.fps)
-        return thumbnail_clip
+        logger.warning(colored(f"[-] Error creating thumbnail: {e}, trying safe fallback", "yellow"))
+        # Fallback: try to get a frame after 0.5s to avoid white flash frames
+        try:
+            from moviepy.editor import ImageClip
+            
+            video_duration = video.duration
+            # Try multiple fallback times, avoiding the very start
+            fallback_times = [
+                max(0.5, video_duration * 0.1),
+                max(0.5, video_duration * 0.2),
+                max(0.5, video_duration * 0.3),
+                video_duration * 0.5,
+            ]
+            
+            for fallback_time in fallback_times:
+                if fallback_time >= video_duration - 0.1:
+                    continue
+                try:
+                    frame = video.get_frame(fallback_time)
+                    # Check if frame is white
+                    if not is_white_or_blank_frame(frame):
+                        thumbnail_clip = ImageClip(frame).set_duration(thumbnail_duration)
+                        thumbnail_clip = thumbnail_clip.set_fps(video.fps)
+                        logger.info(colored(f"[+] Using fallback frame at {fallback_time:.2f}s", "green"))
+                        return thumbnail_clip
+                except Exception:
+                    continue
+            
+            # Last resort: use frame at 0.5s even if it might be white
+            if video_duration > 0.5:
+                frame = video.get_frame(0.5)
+            else:
+                frame = video.get_frame(video_duration * 0.5)
+            
+            thumbnail_clip = ImageClip(frame).set_duration(thumbnail_duration)
+            thumbnail_clip = thumbnail_clip.set_fps(video.fps)
+            return thumbnail_clip
+        except Exception as e2:
+            logger.error(colored(f"[-] Critical error in thumbnail fallback: {e2}", "red"))
+            # Absolute last resort: use middle of video
+            try:
+                mid_time = video_duration * 0.5
+                frame = video.get_frame(mid_time)
+                thumbnail_clip = ImageClip(frame).set_duration(thumbnail_duration)
+                thumbnail_clip = thumbnail_clip.set_fps(video.fps)
+                return thumbnail_clip
+            except:
+                # If everything fails, raise the original error
+                raise e
 
 
 def load_local_clips(

@@ -28,9 +28,9 @@ upload_log_interval = 100
 
 [ffmpeg]
 # Video encoding preset (ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow)
-# medium = good balance of quality and speed (recommended for quality)
-# fast = faster encoding with good quality
-preset = "medium"
+# fast = faster encoding with good quality (recommended for social media clips)
+# medium = better quality but slower (use for final production)
+preset = "fast"
 
 # Constant Rate Factor (CRF) - quality setting
 # Lower = better quality but larger files (18-28 range recommended)

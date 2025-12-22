@@ -234,7 +234,7 @@ impl Config {
         let ffmpeg = config_file.as_ref()
             .map(|c| c.ffmpeg.clone())
             .unwrap_or_else(|| FfmpegConfig {
-                preset: "medium".to_string(), // Good balance of quality and speed
+                preset: "fast".to_string(), // Faster encoding with good quality for social media
                 crf: 20, // High quality (lower is better, 18-23 range recommended)
                 profile: "high".to_string(), // Best quality profile
                 level: "5.1".to_string(), // Level 5.1 supports 4K video (required for iPhone 4K)
@@ -350,7 +350,7 @@ impl Default for Config {
             upload_buffer_size: 524288, // 512KB for better I/O performance with large files
             upload_log_interval: 100,
             ffmpeg: FfmpegConfig {
-                preset: "medium".to_string(), // Good balance of quality and speed
+                preset: "fast".to_string(), // Faster encoding with good quality for social media
                 crf: 20, // High quality (lower is better, 18-23 range recommended)
                 profile: "high".to_string(), // Best quality profile
                 level: "5.1".to_string(), // Level 5.1 supports 4K video (required for iPhone 4K)
