@@ -24,7 +24,8 @@ from tiktok_uploader.Config import Config
 from videogen.music_video import (
     load_local_clips,
     load_local_music,
-    create_beat_synced_video
+    create_beat_synced_video,
+    rename_clips_to_unique_names
 )
 from videogen.gpt import generate_metadata
 from videogen.viral_optimizer import get_viral_optimizer
@@ -355,6 +356,10 @@ def main():
     """
     print(colored("[+] Starting Music Video TikTok Bot", "cyan"))
     print(colored("[+] This bot creates beat-synced music videos from local clips and music", "cyan"))
+    
+    # Rename clips to ensure unique names (prevents collisions from camera SD card)
+    print(colored("[+] Renaming video clips to ensure unique names...", "cyan"))
+    rename_clips_to_unique_names(CLIPS_DIRECTORY)
     
     # Clean temp folder on startup
     temp_dir = "./temp"

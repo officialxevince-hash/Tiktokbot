@@ -15,6 +15,8 @@ import subprocess
 import gc
 import time
 import threading
+import re
+from datetime import datetime
 from typing import List, Optional, Tuple
 import numpy as np
 from moviepy.editor import VideoFileClip, AudioFileClip, concatenate_videoclips, VideoClip
@@ -426,6 +428,86 @@ def create_interesting_thumbnail(video: VideoClip, interesting_times: List[float
             except:
                 # If everything fails, raise the original error
                 raise e
+
+
+def rename_clips_to_unique_names(clips_directory: str = "./clips") -> int:
+    """
+    Rename all video files in the clips directory to have unique names.
+    This prevents naming collisions when new files are added from camera SD cards.
+    
+    Files are renamed with format: clip_YYYYMMDD_HHMMSS_UUID.ext
+    
+    Args:
+        clips_directory (str): Path to directory containing video clips
+    
+    Returns:
+        int: Number of files renamed
+    """
+    try:
+        if not os.path.exists(clips_directory):
+            logger.warning(colored(f"Clips directory not found: {clips_directory}", "yellow"))
+            return 0
+        
+        video_extensions = ('.mp4', '.mov', '.avi', '.mkv', '.MOV', '.MP4')
+        renamed_count = 0
+        
+        # Get all video files
+        video_files = []
+        for filename in os.listdir(clips_directory):
+            if filename.lower().endswith(video_extensions):
+                filepath = os.path.join(clips_directory, filename)
+                if os.path.isfile(filepath):
+                    video_files.append((filename, filepath))
+        
+        if not video_files:
+            return 0
+        
+        print(colored(f"[+] Checking {len(video_files)} video files for unique naming...", "cyan"))
+        
+        # Check if files already have unique names (format: clip_YYYYMMDD_HHMMSS_*.ext)
+        # If they do, skip renaming to avoid unnecessary operations
+        unique_name_pattern = re.compile(r'^clip_\d{8}_\d{6}_[a-f0-9-]+\.', re.IGNORECASE)
+        
+        for filename, filepath in video_files:
+            # Skip if already has unique name
+            if unique_name_pattern.match(filename):
+                continue
+            
+            # Skip processed directory and segments
+            if filename == 'processed' or '_segment_' in filename:
+                continue
+            
+            # Generate unique name: clip_YYYYMMDD_HHMMSS_UUID.ext
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            unique_id = uuid.uuid4().hex[:8]  # Short UUID for readability
+            file_ext = os.path.splitext(filename)[1]
+            new_filename = f"clip_{timestamp}_{unique_id}{file_ext}"
+            new_filepath = os.path.join(clips_directory, new_filename)
+            
+            # Ensure new filename doesn't already exist (very unlikely but check anyway)
+            counter = 1
+            while os.path.exists(new_filepath):
+                new_filename = f"clip_{timestamp}_{unique_id}_{counter}{file_ext}"
+                new_filepath = os.path.join(clips_directory, new_filename)
+                counter += 1
+            
+            try:
+                os.rename(filepath, new_filepath)
+                renamed_count += 1
+                print(colored(f"[+] Renamed: {filename} -> {new_filename}", "green"))
+            except Exception as e:
+                logger.warning(colored(f"[-] Failed to rename {filename}: {e}", "yellow"))
+        
+        if renamed_count > 0:
+            print(colored(f"[+] Renamed {renamed_count} video file(s) to ensure unique names", "green"))
+        else:
+            print(colored(f"[+] All video files already have unique names", "green"))
+        
+        return renamed_count
+    
+    except Exception as e:
+        logger.error(colored(f"[-] Error renaming clips: {e}", "red"))
+        return 0
 
 
 def load_local_clips(
